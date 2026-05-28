@@ -29,7 +29,7 @@ is also printed in the console).
 | `altered-decks-api` | http://decks.altered.local.gd:8001 (or http://localhost:8001) | local | Symfony/FrankenPHP + Postgres; admin at `/admin/login` |
 | `altered-collection-api` | http://collection.altered.local.gd:8002 (or http://localhost:8002) | local | Symfony/API Platform/FrankenPHP + Postgres; docs at `/api/docs` |
 | `altered-website`   | http://website.altered.local.gd:18181 (or http://localhost:18181) | local | Plain PHP/Apache + MariaDB; Keycloak SSO via the `main-site` client |
-| phpMyAdmin          | (link in the dashboard, host port 18182) | local | Browse the website's MariaDB (root/`root`) |
+| `altered-dbgate`    | http://localhost:18182            | local | One web DB client for **all** project DBs (decks + collection Postgres, website MariaDB) |
 | cards               | https://cards.alteredcore.org     | **prod** | decks (and the website) read cards from prod |
 
 `*.local.gd` is public DNS that resolves to `127.0.0.1`, so the browser reaches
@@ -81,9 +81,14 @@ website checkout's own copy. That one file is where the wiring lives:
   Keycloak login she reaches the admin panel at `/admin`. A real login never resets
   it, and it survives a DB wipe. Add more admins via the seed SQL in `apphost.cs`.
   (The bundled local `admin`/`admin` account still exists for `KC_URL`-less setups.)
+- **plugins** — the same seed auto-activates the **Altered Cards** (`core-altered-cards`)
+  and **Réunion Events** (`reunion-events`) plugins, reproducing the admin "Activate"
+  action: an `is_active=1` row in `dev_plugins`, plus running `reunion-events`'
+  `install.sql` (its `{table}` → `dev_plugin_re_*`) once. Idempotent, so it survives a
+  DB wipe — no more activating them by hand in `/admin`.
 
-phpMyAdmin is published on host port **18182** (link in the dashboard); connect as
-`root` / `root`.
+Browse the website's MariaDB (and every other project DB) with **DbGate** — see
+below.
 
 > Editing the realm seed (a new client, changed URIs) means re-running
 > `node dev/clean.js` in `AlteredAuth` and restarting the `altered-auth` resource so
@@ -108,6 +113,23 @@ on start (entrypoint); the DB persists in the `altered-collection-pg-data` volum
 
 The local **website** points its `COLLECTION_API_URL` at this service (over the
 Aspire network), so the collection features use it — though the DB starts empty.
+
+### dbgate
+
+`altered-dbgate` (http://localhost:18182) is a single web DB client for **every**
+database in the stack — the decks and collection Postgres instances and the website
+MariaDB — so you don't need a separate tool per engine. Connections are pre-seeded
+(read-only) from env in `apphost.cs` and reached over the Aspire network by each
+DB's resource-name alias; only the **enabled** services' DBs appear. Dev credentials
+are filled in already, so the connections are ready on open. (It replaces the
+per-service phpMyAdmin.)
+
+To keep the dashboard **Graph** tidy, `apphost.cs` hides the dev DB-password
+parameters and the auto-created `database` nodes (only the Postgres/MariaDB
+**instances** show — the databases are still created and fully functional, just
+not drawn), and declares a relationship from DbGate to each DB instance so it
+appears linked rather than as an island. Hiding is purely presentational
+(`WithInitialState(... IsHidden = true)`).
 
 ## Configuration
 
@@ -134,8 +156,14 @@ A `*.localhost` host can't be used here: libc short-circuits `*.localhost` to
 loopback *inside* containers (and `--add-host` wouldn't override that).
 
 The `auth` image is built from `AlteredAuth/build/Dockerfile`, so it carries the
-custom `unique-attribute` provider (pseudo uniqueness) + Altered themes; we run it
-in dev mode (`start-dev`, H2) and import the realm seeded by `clean.js`.
+custom `unique-attribute` provider (pseudo uniqueness) + Altered themes. We build
+its **`dev` stage** — the optimized prod build re-augmented for the embedded H2 DB —
+and run `start --optimized` (not `start-dev`). That skips Keycloak's slow per-start
+augmentation ("installing your custom providers…") while keeping the ephemeral H2 +
+realm re-import from `clean.js` on every start. Theme/template **hot-reload** is kept
+via runtime options (`KC_SPI_THEME_CACHE_THEMES/TEMPLATES=false`,
+`KC_SPI_THEME_STATIC_MAX_AGE=-1`) plus a bind-mount of `build/themes`, so theme edits
+show up without a restart or rebuild.
 
 ## Getting a token for manual API testing
 

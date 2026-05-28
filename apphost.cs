@@ -6,6 +6,7 @@
 
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Configuration;
 using MySqlConnector;
 using Npgsql;
@@ -52,6 +53,12 @@ IResourceBuilder<ContainerResource>? authApp = null;
 IResourceBuilder<ContainerResource>? decksApp = null;
 IResourceBuilder<ContainerResource>? collectionApp = null;
 
+// The DB server resources, captured so DbGate can declare a relationship to each
+// (graph edges) — only the enabled ones are non-null.
+IResource? decksPgResource = null;
+IResource? collectionPgResource = null;
+IResource? websiteDbResource = null;
+
 // ===========================================================================
 // auth — Keycloak (local), built from AlteredAuth/build/Dockerfile so it carries
 // the custom "unique-attribute" provider (pseudo uniqueness) + Altered themes.
@@ -77,19 +84,31 @@ if (Enabled("auth"))
 {
     var authRepo = Repo("AlteredAuth");
 
-    authApp = builder.AddDockerfile("altered-auth", Path.Combine(authRepo, "build"))
-        .WithArgs("start-dev", "--import-realm")
+    // Build the image's `dev` stage: it's the optimized prod build re-augmented for
+    // the embedded H2 DB, so we run `start --optimized` (NOT start-dev) and skip the
+    // slow per-start augmentation ("installing your custom providers..."). H2 is
+    // ephemeral (no volume), so the realm is re-imported every start and picks up
+    // clean.js edits, exactly like before.
+    authApp = builder.AddDockerfile("altered-auth", Path.Combine(authRepo, "build"), "Dockerfile", stage: "dev")
+        .WithArgs("start", "--optimized", "--import-realm")
         // Publish on 0.0.0.0 (bypassing the Aspire 127.0.0.1 proxy) so the API
         // containers can reach Keycloak via the host gateway. Host port 18080 (not
         // the common 8080) to avoid clashing with other local projects.
         .WithContainerRuntimeArgs("-p", "0.0.0.0:18080:8080")
-        .WithEnvironment("KC_DB", "dev-file")               // H2; the image bakes KC_DB=postgres for prod
+        .WithEnvironment("KC_DB", "dev-file")               // matches the dev image's baked build (prod image bakes postgres)
         .WithEnvironment("KC_BOOTSTRAP_ADMIN_USERNAME", "admin")
         .WithEnvironment("KC_BOOTSTRAP_ADMIN_PASSWORD", "admin")
         .WithEnvironment("KC_HTTP_ENABLED", "true")
         .WithEnvironment("KC_HEALTH_ENABLED", "true")
         .WithEnvironment("KC_HOSTNAME", AuthUrl)
         .WithEnvironment("KC_HOSTNAME_BACKCHANNEL_DYNAMIC", "true")
+        // Keep theme/template hot-reload (what start-dev used to give us): these are
+        // RUNTIME options, so they work under `start --optimized`. Combined with the
+        // themes bind-mount below, edits to the Altered themes show up without a
+        // restart or image rebuild.
+        .WithEnvironment("KC_SPI_THEME_CACHE_THEMES", "false")
+        .WithEnvironment("KC_SPI_THEME_CACHE_TEMPLATES", "false")
+        .WithEnvironment("KC_SPI_THEME_STATIC_MAX_AGE", "-1")
         // Health: Keycloak's management interface (port 9000, enabled by
         // KC_HEALTH_ENABLED) serves /health/ready, which only returns 200 once the
         // server is up AND the realm import has finished. Expose it as an Aspire
@@ -100,6 +119,12 @@ if (Enabled("auth"))
         .WithBindMount(
             Path.Combine(authRepo, "dev", "realm-export.json"),
             "/opt/keycloak/data/import/realm-export.json",
+            isReadOnly: true)
+        // Live theme editing: mount the host themes over the baked copy so changes
+        // are read straight from disk (theme cache is disabled above).
+        .WithBindMount(
+            Path.Combine(authRepo, "build", "themes"),
+            "/opt/keycloak/themes",
             isReadOnly: true)
         // Dashboard links (we publish via -p, so Aspire has no endpoint to show).
         .WithUrl($"{AuthUrl}/realms/players/account/", "Keycloak account")
@@ -119,10 +144,15 @@ if (Enabled("decks"))
 {
     var decksRepo = Repo("altered-core-decks-api");
 
-    var decksPgPassword = builder.AddParameter("altered-decks-db-password", "altereddev", secret: true);
+    var decksPgPassword = builder.AddParameter("altered-decks-db-password", "altereddev", secret: true)
+        .WithInitialState(Hidden("Parameter")); // dev secret — keep it out of the graph
     var decksPg = builder.AddPostgres("altered-decks-pg", password: decksPgPassword)
         .WithDataVolume("altered-decks-pg-data"); // persist the DB across restarts
-    var decksDb = decksPg.AddDatabase("altered-deck", "altered_deck");
+    // AddDatabase auto-creates the DB on the server; we hide its node so only the
+    // Postgres instance shows in the graph (the database stays fully functional).
+    var decksDb = decksPg.AddDatabase("altered-deck", "altered_deck")
+        .WithInitialState(Hidden("Database"));
+    decksPgResource = decksPg.Resource;
 
     // decks-api wants a libpq URL; the host is the postgres resource's network
     // alias (resource name) on the Aspire network, internal port 5432.
@@ -225,10 +255,13 @@ if (Enabled("collection"))
 {
     var collectionRepo = Repo("altered-core-collection-api");
 
-    var collectionPgPassword = builder.AddParameter("altered-collection-db-password", "altereddev", secret: true);
+    var collectionPgPassword = builder.AddParameter("altered-collection-db-password", "altereddev", secret: true)
+        .WithInitialState(Hidden("Parameter")); // dev secret — keep it out of the graph
     var collectionPg = builder.AddPostgres("altered-collection-pg", password: collectionPgPassword)
         .WithDataVolume("altered-collection-pg-data");
-    var collectionDb = collectionPg.AddDatabase("altered-collection", "altered_collection");
+    var collectionDb = collectionPg.AddDatabase("altered-collection", "altered_collection")
+        .WithInitialState(Hidden("Database")); // hide the DB node; instance stays visible
+    collectionPgResource = collectionPg.Resource;
 
     const string collectionDbUrl =
         "postgresql://postgres:altereddev@altered-collection-pg:5432/altered_collection?serverVersion=16&charset=utf8";
@@ -287,10 +320,11 @@ if (Enabled("website"))
     // runs the repo's docker/init-db.sh (schema + migrations, prefix "dev_") on
     // first init only; data persists in a named volume (wipe the volume to
     // re-seed). We use the typed MySQL integration (so we get a real readiness
-    // health check that gates WaitFor + a one-call phpMyAdmin) pointed at the
-    // mariadb image. The integration sets MYSQL_ROOT_PASSWORD from the parameter;
-    // the mariadb image treats that as a compatibility alias.
-    var websiteDbPassword = builder.AddParameter("altered-website-db-password", "root", secret: true);
+    // health check that gates WaitFor) pointed at the mariadb image. The
+    // integration sets MYSQL_ROOT_PASSWORD from the parameter; the mariadb image
+    // treats that as a compatibility alias. Browse it via DbGate (see below).
+    var websiteDbPassword = builder.AddParameter("altered-website-db-password", "root", secret: true)
+        .WithInitialState(Hidden("Parameter")); // dev secret — keep it out of the graph
     var websiteDb = builder.AddMySql("altered-website-db", websiteDbPassword)
         .WithImage("mariadb", "10.11")
         .WithEnvironment("MARIADB_DATABASE", "alteredcore")
@@ -302,8 +336,8 @@ if (Enabled("website"))
             Path.Combine(websiteRepo, "docker", "init-db.sh"),
             "/docker-entrypoint-initdb.d/01-schema.sh",
             isReadOnly: true)
-        .WithDataVolume("altered-website-db-data")
-        .WithPhpMyAdmin(pma => pma.WithHostPort(18182));
+        .WithDataVolume("altered-website-db-data");
+    websiteDbResource = websiteDb.Resource;
 
     // website container — built from the repo Dockerfile (php:7.4-apache), source
     // bind-mounted like the compose. config.local.php is bind-mounted from the
@@ -348,6 +382,24 @@ if (Enabled("website"))
         "VALUES ('11111111-1111-1111-1111-111111111111', 1, 1) " +
         "ON DUPLICATE KEY UPDATE is_admin = 1, group_id = 1;";
 
+    // Plugins to auto-activate at init, reproducing the admin "Activate" action
+    // (admin/plugins.php): a row in {plugins} with is_active=1, plus the plugin's
+    // install.sql run once for plugins that ship one. Done here (in-process,
+    // idempotent) so a fresh/clean DB comes up with these enabled instead of
+    // needing manual activation in /admin. core-altered-cards ships no SQL;
+    // reunion-events ships sql/install.sql whose {table} placeholders resolve to
+    // `dev_plugin_re_<table>` via the website's qp() helper (DB_PREFIX=dev_,
+    // table_prefix=re) — reproduced below with a regex over the real file.
+    const string cardsActivateSql =
+        "INSERT INTO dev_plugins (id, is_active, version, activated_at) " +
+        "VALUES ('core-altered-cards', 1, '1.0.0', NOW()) " +
+        "ON DUPLICATE KEY UPDATE is_active = 1;";
+    const string reunionActivateSql =
+        "INSERT INTO dev_plugins (id, is_active, version, sql_installed_at, activated_at) " +
+        "VALUES ('reunion-events', 1, '1.0.0', NOW(), NOW()) " +
+        "ON DUPLICATE KEY UPDATE is_active = 1, sql_installed_at = COALESCE(sql_installed_at, NOW());";
+    var reunionInstallSqlPath = Path.Combine(websiteRepo, "plugins", "reunion-events", "sql", "install.sql");
+
     websiteDb.OnResourceReady(async (_, _, ct) =>
     {
         // Resolved from the AppHost process, this points at the MariaDB container's
@@ -356,6 +408,28 @@ if (Enabled("website"))
         var connectionString = await websiteDb.Resource.ConnectionStringExpression.GetValueAsync(ct)
             + ";Database=alteredcore";
 
+        // Build the statement list: admin + Altered Cards, then Reunion Events
+        // (its install.sql first so the settings table exists before we mark it
+        // installed). All statements are idempotent (UPSERT / CREATE IF NOT EXISTS).
+        var statements = new List<string> { websiteAdminSeedSql, cardsActivateSql };
+        if (File.Exists(reunionInstallSqlPath))
+        {
+            var reunionInstallSql = Regex.Replace(
+                File.ReadAllText(reunionInstallSqlPath),
+                @"\{([a-z_]+)\}",
+                m => $"`dev_plugin_re_{m.Groups[1].Value}`");
+            statements.Add(reunionInstallSql);
+            statements.Add(reunionActivateSql);
+        }
+        else
+        {
+            // No install.sql found: still activate, but don't claim SQL was installed.
+            statements.Add(
+                "INSERT INTO dev_plugins (id, is_active, version, activated_at) " +
+                "VALUES ('reunion-events', 1, '1.0.0', NOW()) ON DUPLICATE KEY UPDATE is_active = 1;");
+            Console.WriteLine($"[altered] reunion-events install.sql not found at {reunionInstallSqlPath}; activated without it.");
+        }
+
         const int maxAttempts = 10;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
@@ -363,23 +437,90 @@ if (Enabled("website"))
             {
                 await using var conn = new MySqlConnection(connectionString);
                 await conn.OpenAsync(ct);
-                await using var cmd = new MySqlCommand(websiteAdminSeedSql, conn);
-                await cmd.ExecuteNonQueryAsync(ct);
-                Console.WriteLine("[altered] website admin seed applied (alice).");
+                foreach (var sql in statements)
+                {
+                    await using var cmd = new MySqlCommand(sql, conn);
+                    await cmd.ExecuteNonQueryAsync(ct);
+                }
+                Console.WriteLine("[altered] website seed applied (alice admin + plugins: core-altered-cards, reunion-events).");
                 return;
             }
             catch (Exception ex)
             {
                 if (attempt == maxAttempts)
                 {
-                    Console.WriteLine($"[altered] website admin seed FAILED after {maxAttempts} attempts ({ex.Message}).");
+                    Console.WriteLine($"[altered] website seed FAILED after {maxAttempts} attempts ({ex.Message}).");
                     return;
                 }
-                Console.WriteLine($"[altered] website admin seed attempt {attempt}/{maxAttempts} failed ({ex.Message}); retrying in 3s...");
+                Console.WriteLine($"[altered] website seed attempt {attempt}/{maxAttempts} failed ({ex.Message}); retrying in 3s...");
                 await Task.Delay(TimeSpan.FromSeconds(3), ct);
             }
         }
     });
+}
+
+// ===========================================================================
+// dbgate — one web DB client for ALL project databases (replaces the per-service
+// phpMyAdmin). It reaches each DB container over the Aspire network by its
+// resource-name alias (internal ports), so no host ports need publishing on the
+// DBs themselves. Connections are pre-seeded read-only via env vars; only the
+// enabled services' DBs are added. Dev credentials match each DB resource.
+// ===========================================================================
+if (Enabled("decks") || Enabled("collection") || Enabled("website"))
+{
+    var dbgateConnections = new List<string>();
+    var dbgate = builder.AddContainer("altered-dbgate", "dbgate/dbgate")
+        .WithHttpEndpoint(port: 18182, targetPort: 3000, name: "http")
+        .WithVolume("altered-dbgate-data", "/root/.dbgate"); // persist queries/history
+
+    if (Enabled("decks"))
+    {
+        dbgateConnections.Add("decks");
+        dbgate.WithEnvironment("LABEL_decks", "decks (postgres)")
+            .WithEnvironment("SERVER_decks", "altered-decks-pg")
+            .WithEnvironment("PORT_decks", "5432")
+            .WithEnvironment("USER_decks", "postgres")
+            .WithEnvironment("PASSWORD_decks", "altereddev")
+            .WithEnvironment("DATABASE_decks", "altered_deck")
+            .WithEnvironment("ENGINE_decks", "postgres@dbgate-plugin-postgres");
+    }
+
+    if (Enabled("collection"))
+    {
+        dbgateConnections.Add("collection");
+        dbgate.WithEnvironment("LABEL_collection", "collection (postgres)")
+            .WithEnvironment("SERVER_collection", "altered-collection-pg")
+            .WithEnvironment("PORT_collection", "5432")
+            .WithEnvironment("USER_collection", "postgres")
+            .WithEnvironment("PASSWORD_collection", "altereddev")
+            .WithEnvironment("DATABASE_collection", "altered_collection")
+            .WithEnvironment("ENGINE_collection", "postgres@dbgate-plugin-postgres");
+    }
+
+    if (Enabled("website"))
+    {
+        dbgateConnections.Add("website");
+        dbgate.WithEnvironment("LABEL_website", "website (mariadb)")
+            .WithEnvironment("SERVER_website", "altered-website-db")
+            .WithEnvironment("PORT_website", "3306")
+            .WithEnvironment("USER_website", "root")
+            .WithEnvironment("PASSWORD_website", "root")
+            .WithEnvironment("DATABASE_website", "alteredcore")
+            .WithEnvironment("ENGINE_website", "mariadb@dbgate-plugin-mysql");
+    }
+
+    // Declare a relationship to each DB server so DbGate shows up linked in the
+    // graph (it's otherwise an island — it connects via its own CONNECTIONS env,
+    // which Aspire can't infer). WithReferenceRelationship adds the edge only, no
+    // env injected. Link to the servers (visible) since the database nodes are
+    // hidden.
+    if (decksPgResource is not null) dbgate.WithReferenceRelationship(decksPgResource);
+    if (collectionPgResource is not null) dbgate.WithReferenceRelationship(collectionPgResource);
+    if (websiteDbResource is not null) dbgate.WithReferenceRelationship(websiteDbResource);
+
+    dbgate
+        .WithEnvironment("CONNECTIONS", string.Join(",", dbgateConnections))
+        .WithUrl("http://localhost:18182/", "dbgate");
 }
 
 builder.Build().Run();
@@ -390,6 +531,13 @@ builder.Build().Run();
 
 // Absolute directory containing this apphost.cs file (compile-time path).
 static string AppHostDirectory([CallerFilePath] string path = "") => Path.GetDirectoryName(path)!;
+
+// A presentational-only initial snapshot that keeps a resource OUT of the dashboard
+// (graph + table) without changing its behaviour — used for the dev DB passwords and
+// the auto-created database nodes. Aspire updates snapshots with record `with`
+// expressions, so IsHidden set here persists through the resource lifecycle.
+static CustomResourceSnapshot Hidden(string resourceType) =>
+    new() { ResourceType = resourceType, Properties = [], IsHidden = true };
 
 // Resolve a repo path, cloning it from GitHub if the local checkout is missing.
 string Repo(string name)
