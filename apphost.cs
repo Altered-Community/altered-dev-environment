@@ -122,8 +122,8 @@ if (Enabled("auth"))
             "/opt/keycloak/themes",
             isReadOnly: true)
         // Dashboard links (we publish via -p, so Aspire has no endpoint to show).
-        .WithUrl($"{AuthUrl}/realms/players/account/", "Keycloak account")
-        .WithUrl($"{AuthUrl}/admin/", "Keycloak admin console");
+        .WithUrl($"{AuthUrl}/realms/players/account/", "edit profile")
+        .WithUrl($"{AuthUrl}/admin/", "admin");
 }
 
 // ===========================================================================
@@ -186,8 +186,7 @@ if (Enabled("decks"))
         .WaitFor(decksDb)
         // Dashboard links: a friendly *.local.gd host (resolves to 127.0.0.1 ->
         // the Aspire proxy on :8001) plus a direct link to the admin login.
-        .WithUrl("http://decks.altered.local.gd:8001/", "decks-api")
-        .WithUrl("http://decks.altered.local.gd:8001/admin/login", "decks admin");
+        .WithUrl("http://decks.altered.local.gd:8001/admin/login", "admin");
 
     decksApp = decksApi;
 
@@ -294,9 +293,7 @@ if (Enabled("collection"))
         .WithEnvironment("MERCURE_PUBLISHER_JWT_ALG", "HS256")
         .WithEnvironment("MERCURE_SUBSCRIBER_JWT_ALG", "HS256")
         .WithReference(collectionDb)
-        .WaitFor(collectionDb)
-        .WithUrl("http://collection.altered.local.gd:8002/api", "collection-api")
-        .WithUrl("http://collection.altered.local.gd:8002/api/docs", "collection docs");
+        .WaitFor(collectionDb);
 }
 
 // ===========================================================================
@@ -350,10 +347,13 @@ if (Enabled("website"))
             "/var/www/html/config.local.php",
             isReadOnly: true)
         .WithHttpEndpoint(port: 18181, targetPort: 80, name: "http")
+        .WithUrlForEndpoint("http", url =>
+        {
+            url.DisplayText = "website";
+            url.Url = "/";
+        })
         .WithContainerRuntimeArgs("--add-host", "auth.altered.local.gd:host-gateway")
-        .WaitFor(websiteDb)
-        .WithUrl("http://website.altered.local.gd:18181/", "website")
-        .WithUrl("http://website.altered.local.gd:18181/pages/login", "website login");
+        .WaitFor(websiteDb);
 
     // Start after Keycloak (server-side OAuth) and decks-api (server-side deck
     // calls) when those services are enabled.
@@ -514,8 +514,7 @@ if (Enabled("decks") || Enabled("collection") || Enabled("website"))
     if (websiteDbResource is not null) dbgate.WithReferenceRelationship(websiteDbResource);
 
     dbgate
-        .WithEnvironment("CONNECTIONS", string.Join(",", dbgateConnections))
-        .WithUrl("http://localhost:18182/", "dbgate");
+        .WithEnvironment("CONNECTIONS", string.Join(",", dbgateConnections));
 }
 
 builder.Build().Run();
