@@ -1,0 +1,26 @@
+{
+  "appHost": {
+    "path": "apphost.cs"
+  },
+  "profiles": {
+    "https": {
+      "applicationUrl": "https://localhost:17272;http://localhost:15007",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21232",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22071"
+      }
+    },
+    "http": {
+      "applicationUrl": "http://localhost:15007",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "http://localhost:19164",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "http://localhost:20074",
+        "ASPIRE_ALLOW_UNSECURED_TRANSPORT": "true"
+      }
+    }
+  }
+}

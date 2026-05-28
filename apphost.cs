@@ -1,0 +1,240 @@
+#:sdk Aspire.AppHost.Sdk@13.3.5
+#:package Aspire.Hosting.PostgreSQL@13.3.5
+#:package Npgsql@10.0.3
+
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using Microsoft.Extensions.Configuration;
+using Npgsql;
+
+var builder = DistributedApplication.CreateBuilder(args);
+
+// ---------------------------------------------------------------------------
+// Configuration
+//   - appsettings.json        : committed defaults (which services are enabled)
+//   - appsettings.Local.json  : NOT committed; overrides ReposDirectory + secrets
+//     (plays the role of the non-committed .env). Resolved relative to this file
+//     so it works regardless of the build output directory.
+// ---------------------------------------------------------------------------
+var appHostDir = AppHostDirectory();
+builder.Configuration
+    .AddJsonFile(Path.Combine(appHostDir, "appsettings.json"), optional: true, reloadOnChange: false)
+    .AddJsonFile(Path.Combine(appHostDir, "appsettings.Local.json"), optional: true, reloadOnChange: false);
+
+// Where the Altered repos live. Default: the parent of this repo (repos are
+// siblings). Override via appsettings.Local.json ("ReposDirectory") or the
+// ALTERED_REPOS_DIR environment variable.
+var reposDir = builder.Configuration["ReposDirectory"]
+    ?? Environment.GetEnvironmentVariable("ALTERED_REPOS_DIR")
+    ?? Directory.GetParent(appHostDir)!.FullName;
+
+bool Enabled(string service) => builder.Configuration.GetValue($"Services:{service}:Enabled", true);
+
+// ---------------------------------------------------------------------------
+// Repos: clone on demand, otherwise use the local checkout.
+// ---------------------------------------------------------------------------
+var repoUrls = new Dictionary<string, string>
+{
+    ["AlteredAuth"] = "https://github.com/Altered-Re-Union/AlteredAuth.git",
+    ["altered-core-decks-api"] = "https://github.com/Altered-Community/altered-core-decks-api.git",
+    ["altered-core-cards-api"] = "https://github.com/Altered-Community/altered-core-cards-api.git",
+    ["altered-core-collection-api"] = "https://github.com/Altered-Community/altered-core-collection-api.git",
+    ["alteredcore-website"] = "https://github.com/Altered-Community/alteredcore-website.git",
+    ["altered-deckbuilder-poc-v2"] = "https://github.com/Altered-Community/altered-deckbuilder-poc-v2.git",
+};
+
+// ===========================================================================
+// auth — Keycloak (local), built from AlteredAuth/build/Dockerfile so it carries
+// the custom "unique-attribute" provider (pseudo uniqueness) + Altered themes.
+// The image is a prod/optimized build, so we override the command to run dev mode
+// with H2 and import the realm seeded by AlteredAuth/dev/clean.js.
+//
+// One URL for everyone — http://auth.altered.local.gd:8080 — so it works for the
+// browser (login/consent + token "iss"), server-side API calls (JWKS) AND
+// browser-driven OAuth started by a container (the decks /admin flow), with NO
+// hosts-file edit. We namespace under `altered.local.gd` so it can't clash with
+// another project also using local.gd.
+//   - Browser: `*.local.gd` is public DNS resolving to 127.0.0.1 (any depth),
+//     reaching the 0.0.0.0:8080 publish below on loopback.
+//   - Containers: they'd also resolve it to 127.0.0.1 (themselves), so we override
+//     it with --add-host -> the host gateway, also reaching 0.0.0.0:8080.
+// We publish Keycloak on 0.0.0.0 (not the 127.0.0.1 the Aspire proxy would use) so
+// the gateway path works. A `*.localhost` host can't be used: libc short-circuits
+// it to loopback inside containers (and --add-host wouldn't override that).
+// ===========================================================================
+const string AuthUrl = "http://auth.altered.local.gd:18080";
+
+if (Enabled("auth"))
+{
+    var authRepo = Repo("AlteredAuth");
+
+    builder.AddDockerfile("altered-auth", Path.Combine(authRepo, "build"))
+        .WithArgs("start-dev", "--import-realm")
+        // Publish on 0.0.0.0 (bypassing the Aspire 127.0.0.1 proxy) so the API
+        // containers can reach Keycloak via the host gateway. Host port 18080 (not
+        // the common 8080) to avoid clashing with other local projects.
+        .WithContainerRuntimeArgs("-p", "0.0.0.0:18080:8080")
+        .WithEnvironment("KC_DB", "dev-file")               // H2; the image bakes KC_DB=postgres for prod
+        .WithEnvironment("KC_BOOTSTRAP_ADMIN_USERNAME", "admin")
+        .WithEnvironment("KC_BOOTSTRAP_ADMIN_PASSWORD", "admin")
+        .WithEnvironment("KC_HTTP_ENABLED", "true")
+        .WithEnvironment("KC_HEALTH_ENABLED", "true")
+        .WithEnvironment("KC_HOSTNAME", AuthUrl)
+        .WithEnvironment("KC_HOSTNAME_BACKCHANNEL_DYNAMIC", "true")
+        // Health: Keycloak's management interface (port 9000, enabled by
+        // KC_HEALTH_ENABLED) serves /health/ready, which only returns 200 once the
+        // server is up AND the realm import has finished. Expose it as an Aspire
+        // endpoint and health-check it, so the dashboard shows the resource as
+        // healthy only when it's truly ready (and WaitFor dependencies wait).
+        .WithHttpEndpoint(targetPort: 9000, name: "management")
+        .WithHttpHealthCheck("/health/ready", endpointName: "management")
+        .WithBindMount(
+            Path.Combine(authRepo, "dev", "realm-export.json"),
+            "/opt/keycloak/data/import/realm-export.json",
+            isReadOnly: true)
+        // Dashboard links (we publish via -p, so Aspire has no endpoint to show).
+        .WithUrl($"{AuthUrl}/realms/players/account/", "Keycloak account")
+        .WithUrl($"{AuthUrl}/admin/", "Keycloak admin console");
+}
+
+// ===========================================================================
+// decks-api — altered-core-decks-api (local). Symfony/FrankenPHP, own Postgres.
+// Validates Keycloak JWTs (iss must match AuthUrl) and reads cards from prod.
+// ===========================================================================
+const string CardsProdUrl = "https://cards.alteredcore.org/";
+
+if (Enabled("decks"))
+{
+    var decksRepo = Repo("altered-core-decks-api");
+
+    var decksPgPassword = builder.AddParameter("altered-decks-db-password", "altereddev", secret: true);
+    var decksPg = builder.AddPostgres("altered-decks-pg", password: decksPgPassword)
+        .WithDataVolume("altered-decks-pg-data"); // persist the DB across restarts
+    var decksDb = decksPg.AddDatabase("altered-deck", "altered_deck");
+
+    // decks-api wants a libpq URL; the host is the postgres resource's network
+    // alias (resource name) on the Aspire network, internal port 5432.
+    const string decksDbUrl =
+        "postgresql://postgres:altereddev@altered-decks-pg:5432/altered_deck?serverVersion=16&charset=utf8";
+
+    var decksApi = builder.AddDockerfile("altered-decks-api", decksRepo, "Dockerfile", stage: "frankenphp_dev")
+        .WithBindMount(decksRepo, "/app")
+        // Keep vendor/ in a container-managed volume (not the host's, which may be
+        // incomplete on Windows). The dev image bakes no vendor, so the entrypoint
+        // runs "composer install" into this volume on first start.
+        .WithVolume("altered-decks-api-vendor", "/app/vendor")
+        .WithHttpEndpoint(port: 8001, targetPort: 80, name: "http")
+        // Resolve the Keycloak host to the host gateway from inside the container
+        // (overriding the public *.local.gd -> 127.0.0.1 record), so decks reaches
+        // Keycloak (published on 0.0.0.0:8080) at the same URL the browser uses.
+        .WithContainerRuntimeArgs("--add-host", "auth.altered.local.gd:host-gateway")
+        .WithEnvironment("APP_ENV", "dev")
+        .WithEnvironment("APP_SECRET", "c869928bd9fb7963519fc0d4bdb1501d80707aa1f4947d583e4e6d0cd06bbcb8")
+        .WithEnvironment("SERVER_NAME", ":80")
+        .WithEnvironment("DEFAULT_URI", "http://decks.dev.localhost:8001")
+        .WithEnvironment("DATABASE_URL", decksDbUrl)
+        .WithEnvironment("CORS_ALLOW_ORIGIN", "^https?://([a-z0-9-]+\\.)*(localhost|127\\.0\\.0\\.1|dev\\.localhost)(:[0-9]+)?$")
+        .WithEnvironment("KEYCLOAK_BASE_URL", AuthUrl)
+        .WithEnvironment("KEYCLOAK_REALM", "players")
+        .WithEnvironment("KEYCLOAK_CLIENT_ID", "toxicity-deckbuilder")
+        .WithEnvironment("KEYCLOAK_CLIENT_SECRET", "dev-toxicity-deckbuilder-secret")
+        .WithEnvironment("DEV_AUTH_ENABLED", "true")
+        .WithEnvironment("ALTERED_CORE_URL", CardsProdUrl)
+        // Mercure (Caddy module) needs its JWT keys present to boot.
+        .WithEnvironment("MERCURE_PUBLISHER_JWT_KEY", "!ChangeThisMercureHubJWTSecretKey!")
+        .WithEnvironment("MERCURE_SUBSCRIBER_JWT_KEY", "!ChangeThisMercureHubJWTSecretKey!")
+        .WithEnvironment("MERCURE_PUBLISHER_JWT_ALG", "HS256")
+        .WithEnvironment("MERCURE_SUBSCRIBER_JWT_ALG", "HS256")
+        .WithReference(decksDb)
+        .WaitFor(decksDb)
+        // Dashboard links: a friendly *.local.gd host (resolves to 127.0.0.1 ->
+        // the Aspire proxy on :8001) plus a direct link to the admin login.
+        .WithUrl("http://decks.altered.local.gd:8001/", "decks-api")
+        .WithUrl("http://decks.altered.local.gd:8001/admin/login", "decks admin");
+
+    // Auto-seed dev admins so they survive a DB reset and a fresh start: an
+    // idempotent UPSERT keyed on the user's FIXED Keycloak id (= JWT "sub"). It
+    // runs in-process from the AppHost (no extra container, so nothing shows up in
+    // the dashboard masquerading as an app) once decks-api reports ready — its
+    // entrypoint has applied the migrations, so the "user" table exists. Re-runs on
+    // every start; ON CONFLICT keeps it a no-op when the row already exists (e.g.
+    // created by a real login). Add rows here for more admins (e.g. bob = 2222...).
+    const string adminSeedSql =
+        "INSERT INTO \"user\" (id, keycloak_id, email, username, created_at, is_admin) " +
+        "VALUES (gen_random_uuid(), '11111111-1111-1111-1111-111111111111', 'alice@example.test', 'alice', now(), true) " +
+        "ON CONFLICT (keycloak_id) DO UPDATE SET is_admin = true;";
+
+    decksApi.OnResourceReady(async (_, _, ct) =>
+    {
+        // Resolved from the AppHost process, this connection string points at the
+        // Postgres container's host-mapped port, so we can reach it directly.
+        var connectionString = await decksDb.Resource.ConnectionStringExpression.GetValueAsync(ct);
+
+        // decks-api applies migrations in its entrypoint asynchronously, so the
+        // "user" table may not exist the instant the container reports ready —
+        // retry briefly before giving up.
+        const int maxAttempts = 10;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                await using var conn = new NpgsqlConnection(connectionString);
+                await conn.OpenAsync(ct);
+                await using var cmd = new NpgsqlCommand(adminSeedSql, conn);
+                await cmd.ExecuteNonQueryAsync(ct);
+                Console.WriteLine("[altered] decks admin seed applied.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                if (attempt == maxAttempts)
+                {
+                    Console.WriteLine($"[altered] decks admin seed FAILED after {maxAttempts} attempts ({ex.Message}).");
+                    return;
+                }
+                Console.WriteLine($"[altered] decks admin seed attempt {attempt}/{maxAttempts} failed ({ex.Message}); retrying in 3s...");
+                await Task.Delay(TimeSpan.FromSeconds(3), ct);
+            }
+        }
+    });
+}
+
+builder.Build().Run();
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// Absolute directory containing this apphost.cs file (compile-time path).
+static string AppHostDirectory([CallerFilePath] string path = "") => Path.GetDirectoryName(path)!;
+
+// Resolve a repo path, cloning it from GitHub if the local checkout is missing.
+string Repo(string name)
+{
+    var path = Path.Combine(reposDir, name);
+    if (Directory.Exists(path))
+    {
+        return path;
+    }
+
+    if (!repoUrls.TryGetValue(name, out var url))
+    {
+        throw new InvalidOperationException($"Unknown repo '{name}' and no local checkout at {path}.");
+    }
+
+    Console.WriteLine($"[altered] cloning {name} -> {path}");
+    Directory.CreateDirectory(reposDir);
+    var psi = new ProcessStartInfo("git", $"clone --depth 1 {url} \"{path}\"")
+    {
+        UseShellExecute = false,
+        WorkingDirectory = reposDir,
+    };
+    using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start git.");
+    proc.WaitForExit();
+    if (proc.ExitCode != 0)
+    {
+        throw new InvalidOperationException($"git clone failed for {name} (exit {proc.ExitCode}).");
+    }
+
+    return path;
+}

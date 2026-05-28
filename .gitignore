@@ -1,0 +1,9 @@
+# Local, non-committed config (repos path + secrets) — the ".env" of this repo
+appsettings.Local.json
+
+# .NET build output
+bin/
+obj/
+
+# Aspire / tooling
+*.user

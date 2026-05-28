@@ -1,0 +1,13 @@
+{
+  "//": "Copy to appsettings.Local.json (gitignored) and adjust. Plays the role of a non-committed .env.",
+
+  "//ReposDirectory": "Absolute path where the Altered repos live / will be cloned. Defaults to the parent folder of this repo (siblings).",
+  "ReposDirectory": "C:\\Users\\Reverb\\Documents\\repos",
+
+  "//Services": "Toggle which services the AppHost mounts. Same shape as appsettings.json.",
+  "Services": {
+    "auth": { "Enabled": true },
+    "decks": { "Enabled": true },
+    "cards": { "Enabled": false }
+  }
+}
