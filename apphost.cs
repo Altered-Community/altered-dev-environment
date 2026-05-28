@@ -50,6 +50,7 @@ var repoUrls = new Dictionary<string, string>
 // later services can WaitFor them only when their dependency is actually enabled.
 IResourceBuilder<ContainerResource>? authApp = null;
 IResourceBuilder<ContainerResource>? decksApp = null;
+IResourceBuilder<ContainerResource>? collectionApp = null;
 
 // ===========================================================================
 // auth — Keycloak (local), built from AlteredAuth/build/Dockerfile so it carries
@@ -109,7 +110,10 @@ if (Enabled("auth"))
 // decks-api — altered-core-decks-api (local). Symfony/FrankenPHP, own Postgres.
 // Validates Keycloak JWTs (iss must match AuthUrl) and reads cards from prod.
 // ===========================================================================
-const string CardsProdUrl = "https://cards.alteredcore.org/";
+// No trailing slash: both decks-api and collection-api build cards URLs as
+// ALTERED_CORE_URL . "/api/cards/..." — a trailing slash here yields a double
+// slash ("//api/cards/batch") that the prod cards server 404s.
+const string CardsProdUrl = "https://cards.alteredcore.org";
 
 if (Enabled("decks"))
 {
@@ -210,6 +214,64 @@ if (Enabled("decks"))
 }
 
 // ===========================================================================
+// collection-api — altered-core-collection-api (local). Symfony/API Platform on
+// FrankenPHP + Postgres. Validates Keycloak JWTs via the realm JWKS only — no
+// client/secret, no audience/issuer check (see KeycloakJwtDecoder) — so it accepts
+// any token signed by the local realm (e.g. one minted for the website). Reads
+// cards from prod. The FrankenPHP Dockerfile lives in this repo (collection/)
+// because the upstream repo ships none; the source is bind-mounted at runtime.
+// ===========================================================================
+if (Enabled("collection"))
+{
+    var collectionRepo = Repo("altered-core-collection-api");
+
+    var collectionPgPassword = builder.AddParameter("altered-collection-db-password", "altereddev", secret: true);
+    var collectionPg = builder.AddPostgres("altered-collection-pg", password: collectionPgPassword)
+        .WithDataVolume("altered-collection-pg-data");
+    var collectionDb = collectionPg.AddDatabase("altered-collection", "altered_collection");
+
+    const string collectionDbUrl =
+        "postgresql://postgres:altereddev@altered-collection-pg:5432/altered_collection?serverVersion=16&charset=utf8";
+
+    collectionApp = builder.AddDockerfile(
+            "altered-collection-api", Path.Combine(appHostDir, "collection"), "Dockerfile", stage: "frankenphp_dev")
+        .WithBindMount(collectionRepo, "/app")
+        // vendor/ in a container-managed volume; the dev entrypoint runs composer
+        // install into it on first start (the host vendor may be incomplete on
+        // Windows).
+        .WithVolume("altered-collection-api-vendor", "/app/vendor")
+        .WithHttpEndpoint(port: 8002, targetPort: 80, name: "http")
+        // Reach Keycloak (published on 0.0.0.0:18080) from inside the container at
+        // the same URL the browser uses, so JWKS fetches resolve to the host
+        // gateway rather than the container itself.
+        .WithContainerRuntimeArgs("--add-host", "auth.altered.local.gd:host-gateway")
+        .WithEnvironment("APP_ENV", "dev")
+        .WithEnvironment("APP_SECRET", "ead983759a87835cc8a76efda0a01149")
+        .WithEnvironment("SERVER_NAME", ":80")
+        .WithEnvironment("DEFAULT_URI", "http://collection.dev.localhost:8002")
+        .WithEnvironment("DATABASE_URL", collectionDbUrl)
+        .WithEnvironment("CORS_ALLOW_ORIGIN", "^https?://([a-z0-9-]+\\.)*(localhost|127\\.0\\.0\\.1|dev\\.localhost)(:[0-9]+)?$")
+        .WithEnvironment("KEYCLOAK_BASE_URL", AuthUrl)
+        .WithEnvironment("KEYCLOAK_REALM", "players")
+        // CLIENT_ID/SECRET are unused by the JWKS-only validator; set for parity
+        // with the app's .env so nothing looks misconfigured.
+        .WithEnvironment("KEYCLOAK_CLIENT_ID", "altered-collection")
+        .WithEnvironment("KEYCLOAK_CLIENT_SECRET", "dev-altered-collection-secret")
+        .WithEnvironment("DEV_AUTH_ENABLED", "true")
+        .WithEnvironment("ALTERED_CORE_URL", CardsProdUrl)
+        // The bundled Caddyfile declares a mercure directive (unused here — no
+        // Mercure bundle) that still needs its JWT keys present to boot.
+        .WithEnvironment("MERCURE_PUBLISHER_JWT_KEY", "!ChangeThisMercureHubJWTSecretKey!")
+        .WithEnvironment("MERCURE_SUBSCRIBER_JWT_KEY", "!ChangeThisMercureHubJWTSecretKey!")
+        .WithEnvironment("MERCURE_PUBLISHER_JWT_ALG", "HS256")
+        .WithEnvironment("MERCURE_SUBSCRIBER_JWT_ALG", "HS256")
+        .WithReference(collectionDb)
+        .WaitFor(collectionDb)
+        .WithUrl("http://collection.altered.local.gd:8002/api", "collection-api")
+        .WithUrl("http://collection.altered.local.gd:8002/api/docs", "collection docs");
+}
+
+// ===========================================================================
 // website — alteredcore-website (local). Plain PHP 7.4 + Apache, MariaDB, no
 // build step. Wired to local Keycloak (the "main-site" client) and the local
 // decks-api; cards/cdn/collection stay on prod (not local yet). The site reads
@@ -268,6 +330,7 @@ if (Enabled("website"))
     // calls) when those services are enabled.
     if (authApp is not null) website.WaitFor(authApp);
     if (decksApp is not null) website.WaitFor(decksApp);
+    if (collectionApp is not null) website.WaitFor(collectionApp);
 
     // Auto-seed alice as a website admin (mirrors the decks admin seed) so it
     // survives a DB reset / fresh start: an idempotent UPSERT keyed on her FIXED

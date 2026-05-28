@@ -63,15 +63,16 @@ define('GITHUB_APP_PRIVATE_KEY', '');
 define('GITHUB_REPO', 'owner/community-feedback');
 
 // ─── External APIs ────────────────────────────────────────────────────────────
-// decks → LOCAL decks-api, reached over the Aspire network by resource name
-// (server-side PHP calls only; the browser never hits decks directly). Assumes
-// the "decks" service is enabled. cards/cdn/collection stay on prod — they are
-// not wired locally yet (cards reads the same prod API decks-api itself uses).
+// decks + collection → LOCAL apis, reached over the Aspire network by resource
+// name (server-side PHP calls only; the browser never hits them directly).
+// Assumes the "decks" and "collection" services are enabled. The local collection
+// DB starts empty, so collection pages show no data until some is added.
+// cards/cdn stay on prod (cards reads the same prod API decks-api itself uses).
 define('CARDS_API_URL',     'https://cards.alteredcore.org');
 define('DECKS_API_URL',     'http://altered-decks-api:80');
 define('CDN_URL',           'https://cdn.alteredcore.org');
 define('OWNERSHIP_API_URL', 'https://ownership.altered.re/');
-define('COLLECTION_API_URL', 'https://collection.alteredcore.org');
+define('COLLECTION_API_URL', 'http://altered-collection-api:80');
 define('COLLECTION_USE_API', true);
 
 // ─── Deployment ───────────────────────────────────────────────────────────────

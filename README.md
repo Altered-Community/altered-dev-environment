@@ -27,6 +27,7 @@ is also printed in the console).
 |-------------|-----------------------------------|--------|-------|
 | `altered-auth`      | http://auth.altered.local.gd:18080    | local  | Keycloak, realm `players`, admin `admin`/`admin` |
 | `altered-decks-api` | http://decks.altered.local.gd:8001 (or http://localhost:8001) | local | Symfony/FrankenPHP + Postgres; admin at `/admin/login` |
+| `altered-collection-api` | http://collection.altered.local.gd:8002 (or http://localhost:8002) | local | Symfony/API Platform/FrankenPHP + Postgres; docs at `/api/docs` |
 | `altered-website`   | http://website.altered.local.gd:18181 (or http://localhost:18181) | local | Plain PHP/Apache + MariaDB; Keycloak SSO via the `main-site` client |
 | phpMyAdmin          | (link in the dashboard, host port 18182) | local | Browse the website's MariaDB (root/`root`) |
 | cards               | https://cards.alteredcore.org     | **prod** | decks (and the website) read cards from prod |
@@ -88,6 +89,26 @@ phpMyAdmin is published on host port **18182** (link in the dashboard); connect 
 > `node dev/clean.js` in `AlteredAuth` and restarting the `altered-auth` resource so
 > it re-imports (its H2 store is ephemeral, so a restart picks up the new export).
 
+### collection-api
+
+`altered-collection-api` is a Symfony / API Platform service on FrankenPHP with its
+own Postgres — the same shape as decks-api. Its auth is simpler than the others: the
+`KeycloakJwtDecoder` validates a bearer token **only against the realm JWKS**
+(signature), with no client secret, audience, or issuer check, so it accepts any
+token the local realm signs — including the one the website forwards. It reads cards
+from **prod** (`ALTERED_CORE_URL`) and supports the `DEV_AUTH_ENABLED` HS256 dev
+token like decks.
+
+The upstream repo ships **no Dockerfile** (it's meant to run under the Symfony CLI),
+so the FrankenPHP scaffolding lives here in [collection/](collection/) — the standard
+`dunglas/symfony-docker` template, tuned for `pdo_pgsql`. The AppHost builds its
+`frankenphp_dev` target with that folder as the build context and bind-mounts the
+collection-api source at `/app`, leaving the upstream repo untouched. Migrations run
+on start (entrypoint); the DB persists in the `altered-collection-pg-data` volume.
+
+The local **website** points its `COLLECTION_API_URL` at this service (over the
+Aspire network), so the collection features use it — though the DB starts empty.
+
 ## Configuration
 
 - `appsettings.json` — committed defaults; toggle services under `Services:*:Enabled`.
@@ -130,5 +151,5 @@ client app locally and let it drive the login.
 
 Set `Services:<name>:Enabled` to `false` in `appsettings.Local.json` to skip a
 service, or add a new resource in `apphost.cs` (clone URL in `repoUrls`). Coming
-next: local cards-api, collection-api, deckbuilder. `AlteredOwnership`
-is intentionally not wired yet.
+next: local cards-api, deckbuilder. `AlteredOwnership` is intentionally not wired
+yet.
