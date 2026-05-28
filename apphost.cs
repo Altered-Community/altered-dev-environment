@@ -1,10 +1,13 @@
 #:sdk Aspire.AppHost.Sdk@13.3.5
 #:package Aspire.Hosting.PostgreSQL@13.3.5
+#:package Aspire.Hosting.MySql@13.3.5
 #:package Npgsql@10.0.3
+#:package MySqlConnector@2.4.0
 
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Configuration;
+using MySqlConnector;
 using Npgsql;
 
 var builder = DistributedApplication.CreateBuilder(args);
@@ -43,6 +46,11 @@ var repoUrls = new Dictionary<string, string>
     ["altered-deckbuilder-poc-v2"] = "https://github.com/Altered-Community/altered-deckbuilder-poc-v2.git",
 };
 
+// Handles to cross-referenced resources, assigned as each service is mounted, so
+// later services can WaitFor them only when their dependency is actually enabled.
+IResourceBuilder<ContainerResource>? authApp = null;
+IResourceBuilder<ContainerResource>? decksApp = null;
+
 // ===========================================================================
 // auth — Keycloak (local), built from AlteredAuth/build/Dockerfile so it carries
 // the custom "unique-attribute" provider (pseudo uniqueness) + Altered themes.
@@ -68,7 +76,7 @@ if (Enabled("auth"))
 {
     var authRepo = Repo("AlteredAuth");
 
-    builder.AddDockerfile("altered-auth", Path.Combine(authRepo, "build"))
+    authApp = builder.AddDockerfile("altered-auth", Path.Combine(authRepo, "build"))
         .WithArgs("start-dev", "--import-realm")
         // Publish on 0.0.0.0 (bypassing the Aspire 127.0.0.1 proxy) so the API
         // containers can reach Keycloak via the host gateway. Host port 18080 (not
@@ -152,6 +160,8 @@ if (Enabled("decks"))
         .WithUrl("http://decks.altered.local.gd:8001/", "decks-api")
         .WithUrl("http://decks.altered.local.gd:8001/admin/login", "decks admin");
 
+    decksApp = decksApi;
+
     // Auto-seed dev admins so they survive a DB reset and a fresh start: an
     // idempotent UPSERT keyed on the user's FIXED Keycloak id (= JWT "sub"). It
     // runs in-process from the AppHost (no extra container, so nothing shows up in
@@ -193,6 +203,116 @@ if (Enabled("decks"))
                     return;
                 }
                 Console.WriteLine($"[altered] decks admin seed attempt {attempt}/{maxAttempts} failed ({ex.Message}); retrying in 3s...");
+                await Task.Delay(TimeSpan.FromSeconds(3), ct);
+            }
+        }
+    });
+}
+
+// ===========================================================================
+// website — alteredcore-website (local). Plain PHP 7.4 + Apache, MariaDB, no
+// build step. Wired to local Keycloak (the "main-site" client) and the local
+// decks-api; cards/cdn/collection stay on prod (not local yet). The site reads
+// plain define() constants from config.local.php (no env support), so the
+// dev-environment owns that file and bind-mounts it over the user's checkout.
+// ===========================================================================
+if (Enabled("website"))
+{
+    var websiteRepo = Repo("alteredcore-website");
+
+    // MariaDB for the website, mirroring the repo's docker-compose. The official
+    // image entrypoint creates the alteredcore user+db from the MARIADB_* vars and
+    // runs the repo's docker/init-db.sh (schema + migrations, prefix "dev_") on
+    // first init only; data persists in a named volume (wipe the volume to
+    // re-seed). We use the typed MySQL integration (so we get a real readiness
+    // health check that gates WaitFor + a one-call phpMyAdmin) pointed at the
+    // mariadb image. The integration sets MYSQL_ROOT_PASSWORD from the parameter;
+    // the mariadb image treats that as a compatibility alias.
+    var websiteDbPassword = builder.AddParameter("altered-website-db-password", "root", secret: true);
+    var websiteDb = builder.AddMySql("altered-website-db", websiteDbPassword)
+        .WithImage("mariadb", "10.11")
+        .WithEnvironment("MARIADB_DATABASE", "alteredcore")
+        .WithEnvironment("MARIADB_USER", "alteredcore")
+        .WithEnvironment("MARIADB_PASSWORD", "alteredcore")
+        .WithEnvironment("DB_PREFIX", "dev_") // consumed by docker/init-db.sh
+        .WithBindMount(Path.Combine(websiteRepo, "sql"), "/tmp/sql", isReadOnly: true)
+        .WithBindMount(
+            Path.Combine(websiteRepo, "docker", "init-db.sh"),
+            "/docker-entrypoint-initdb.d/01-schema.sh",
+            isReadOnly: true)
+        .WithDataVolume("altered-website-db-data")
+        .WithPhpMyAdmin(pma => pma.WithHostPort(18182));
+
+    // website container — built from the repo Dockerfile (php:7.4-apache), source
+    // bind-mounted like the compose. config.local.php is bind-mounted from the
+    // AppHost-managed dev config (overrides the user's checkout copy), which wires
+    // DB + local Keycloak + local decks-api. Needs the same Keycloak host-gateway
+    // override as decks: the server-side OAuth code/token exchange calls Keycloak
+    // at the public *.local.gd URL, which would otherwise resolve to the container
+    // itself. Browser → website goes through the Aspire proxy on :18181, and the
+    // OAuth redirect_uri (built from the browser's Host) matches the redirect URIs
+    // seeded for the "main-site" client.
+    var website = builder.AddDockerfile("altered-website", websiteRepo)
+        .WithBindMount(websiteRepo, "/var/www/html")
+        .WithBindMount(
+            Path.Combine(appHostDir, "website", "config.local.php"),
+            "/var/www/html/config.local.php",
+            isReadOnly: true)
+        .WithHttpEndpoint(port: 18181, targetPort: 80, name: "http")
+        .WithContainerRuntimeArgs("--add-host", "auth.altered.local.gd:host-gateway")
+        .WaitFor(websiteDb)
+        .WithUrl("http://website.altered.local.gd:18181/", "website")
+        .WithUrl("http://website.altered.local.gd:18181/pages/login", "website login");
+
+    // Start after Keycloak (server-side OAuth) and decks-api (server-side deck
+    // calls) when those services are enabled.
+    if (authApp is not null) website.WaitFor(authApp);
+    if (decksApp is not null) website.WaitFor(decksApp);
+
+    // Auto-seed alice as a website admin (mirrors the decks admin seed) so it
+    // survives a DB reset / fresh start: an idempotent UPSERT keyed on her FIXED
+    // Keycloak sub. Admin-panel access is gated on the user's GROUP
+    // (user_groups.can_access_admin), so we put her in the "Admin" group (id 1,
+    // seeded by schema.sql with all perms + can_access_admin) and set the is_admin
+    // flag too, matching the bundled local "admin" account. Runs in-process from
+    // the AppHost (no extra container, nothing masquerading as an app in the
+    // dashboard) once the DB reports ready — by then the init script has created
+    // the tables and the Admin group. ON DUPLICATE KEY keeps it a no-op once
+    // alice's row exists (e.g. created by a real Keycloak login). The table name
+    // carries the dev_ prefix this stack runs with (see website/config.local.php).
+    const string websiteAdminSeedSql =
+        "INSERT INTO dev_users (kc_sub, is_admin, group_id) " +
+        "VALUES ('11111111-1111-1111-1111-111111111111', 1, 1) " +
+        "ON DUPLICATE KEY UPDATE is_admin = 1, group_id = 1;";
+
+    websiteDb.OnResourceReady(async (_, _, ct) =>
+    {
+        // Resolved from the AppHost process, this points at the MariaDB container's
+        // host-mapped port; append the app database (the server connection string
+        // has no default schema).
+        var connectionString = await websiteDb.Resource.ConnectionStringExpression.GetValueAsync(ct)
+            + ";Database=alteredcore";
+
+        const int maxAttempts = 10;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                await using var conn = new MySqlConnection(connectionString);
+                await conn.OpenAsync(ct);
+                await using var cmd = new MySqlCommand(websiteAdminSeedSql, conn);
+                await cmd.ExecuteNonQueryAsync(ct);
+                Console.WriteLine("[altered] website admin seed applied (alice).");
+                return;
+            }
+            catch (Exception ex)
+            {
+                if (attempt == maxAttempts)
+                {
+                    Console.WriteLine($"[altered] website admin seed FAILED after {maxAttempts} attempts ({ex.Message}).");
+                    return;
+                }
+                Console.WriteLine($"[altered] website admin seed attempt {attempt}/{maxAttempts} failed ({ex.Message}); retrying in 3s...");
                 await Task.Delay(TimeSpan.FromSeconds(3), ct);
             }
         }

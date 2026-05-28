@@ -8,6 +8,7 @@
   "Services": {
     "auth": { "Enabled": true },
     "decks": { "Enabled": true },
+    "website": { "Enabled": true },
     "cards": { "Enabled": false }
   }
 }

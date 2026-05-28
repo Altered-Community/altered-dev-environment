@@ -27,7 +27,9 @@ is also printed in the console).
 |-------------|-----------------------------------|--------|-------|
 | `altered-auth`      | http://auth.altered.local.gd:18080    | local  | Keycloak, realm `players`, admin `admin`/`admin` |
 | `altered-decks-api` | http://decks.altered.local.gd:8001 (or http://localhost:8001) | local | Symfony/FrankenPHP + Postgres; admin at `/admin/login` |
-| cards               | https://cards.alteredcore.org     | **prod** | decks reads cards from prod (`ALTERED_CORE_URL`) |
+| `altered-website`   | http://website.altered.local.gd:18181 (or http://localhost:18181) | local | Plain PHP/Apache + MariaDB; Keycloak SSO via the `main-site` client |
+| phpMyAdmin          | (link in the dashboard, host port 18182) | local | Browse the website's MariaDB (root/`root`) |
+| cards               | https://cards.alteredcore.org     | **prod** | decks (and the website) read cards from prod |
 
 `*.local.gd` is public DNS that resolves to `127.0.0.1`, so the browser reaches
 Keycloak with **no hosts-file edit**. `*.dev.localhost` resolves to `127.0.0.1` in
@@ -48,6 +50,43 @@ back to a known state. Because
 the id is fixed, that row *is* the same user alice logs in as via Keycloak — so the
 decks `/admin` UI (http://localhost:8001/admin/login) accepts her. Add more admins
 by adding rows to the seed SQL in `apphost.cs` (e.g. bob = `2222…`).
+
+### website
+
+`altered-website` is plain PHP 7.4 + Apache with its own MariaDB — no framework, no
+build step. The site reads plain `define()` constants from `config.local.php` (it
+has no env-var support), so the dev-environment **owns** that file: a dev copy lives
+at [website/config.local.php](website/config.local.php) and is bind-mounted over the
+website checkout's own copy. That one file is where the wiring lives:
+
+- **Database** — a MariaDB container (the typed Aspire MySQL integration pointed at
+  the `mariadb:10.11` image, so we get a readiness health check + phpMyAdmin). The
+  official image creates the `alteredcore` user+db and runs the repo's
+  `docker/init-db.sh` (schema + migrations, prefix `dev_`) on **first init**; data
+  persists in the `altered-website-db-data` volume. To re-seed, remove that volume.
+- **Auth** — wired to the local Keycloak via the **`main-site`** client (seeded by
+  `AlteredAuth/dev/clean.js` with a dev secret + the local redirect/logout URIs).
+  The alice/bob test users log in here too. The site does the auth-code/token
+  exchange server-side, so its container gets the same `auth.altered.local.gd`
+  host-gateway override as decks.
+- **decks** — `DECKS_API_URL` points at the **local** decks-api over the Aspire
+  network (server-side calls only). The site forwards the user's Keycloak access
+  token, which decks validates against the same realm. cards/cdn/collection stay on
+  **prod** (not wired locally yet).
+- **admins** — like decks, the AppHost runs (in-process, once the DB is ready — no
+  separate dashboard resource) an idempotent UPSERT that makes **alice** a website
+  admin, keyed on her fixed Keycloak `sub`. Admin access is group-based, so she's
+  put in the seeded **Admin** group (id 1, all perms) with `is_admin` set; after a
+  Keycloak login she reaches the admin panel at `/admin`. A real login never resets
+  it, and it survives a DB wipe. Add more admins via the seed SQL in `apphost.cs`.
+  (The bundled local `admin`/`admin` account still exists for `KC_URL`-less setups.)
+
+phpMyAdmin is published on host port **18182** (link in the dashboard); connect as
+`root` / `root`.
+
+> Editing the realm seed (a new client, changed URIs) means re-running
+> `node dev/clean.js` in `AlteredAuth` and restarting the `altered-auth` resource so
+> it re-imports (its H2 store is ephemeral, so a restart picks up the new export).
 
 ## Configuration
 
@@ -91,5 +130,5 @@ client app locally and let it drive the login.
 
 Set `Services:<name>:Enabled` to `false` in `appsettings.Local.json` to skip a
 service, or add a new resource in `apphost.cs` (clone URL in `repoUrls`). Coming
-next: local cards-api, collection-api, website, deckbuilder. `AlteredOwnership`
+next: local cards-api, collection-api, deckbuilder. `AlteredOwnership`
 is intentionally not wired yet.
