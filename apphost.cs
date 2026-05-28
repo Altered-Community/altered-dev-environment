@@ -84,13 +84,8 @@ if (Enabled("auth"))
 {
     var authRepo = Repo("AlteredAuth");
 
-    // Build the image's `dev` stage: it's the optimized prod build re-augmented for
-    // the embedded H2 DB, so we run `start --optimized` (NOT start-dev) and skip the
-    // slow per-start augmentation ("installing your custom providers..."). H2 is
-    // ephemeral (no volume), so the realm is re-imported every start and picks up
-    // clean.js edits, exactly like before.
-    authApp = builder.AddDockerfile("altered-auth", Path.Combine(authRepo, "build"), "Dockerfile", stage: "dev")
-        .WithArgs("start", "--optimized", "--import-realm")
+    authApp = builder.AddDockerfile("altered-auth", Path.Combine(authRepo, "build"))
+        .WithArgs("start-dev", "--import-realm")
         // Publish on 0.0.0.0 (bypassing the Aspire 127.0.0.1 proxy) so the API
         // containers can reach Keycloak via the host gateway. Host port 18080 (not
         // the common 8080) to avoid clashing with other local projects.
