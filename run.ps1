@@ -10,15 +10,34 @@ function Confirm-Yes([string]$question) {
     return ($ans -eq '' -or $ans -match '^(y|yes|o|oui)$')
 }
 
+function Test-DotNet10Sdk {
+    $sdks = & dotnet --list-sdks 2>$null
+    return ($null -ne ($sdks | Where-Object { $_ -match '^10\.' }))
+}
+
+function Refresh-DotNetPath {
+    $env:PATH = "$env:ProgramFiles\dotnet;$env:USERPROFILE\.dotnet\tools;$env:PATH"
+}
+
 # --- .NET 10 SDK ---
 if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
     Write-Host "The .NET SDK is not installed." -ForegroundColor Yellow
+} elseif (-not (Test-DotNet10Sdk)) {
+    $installed = (& dotnet --list-sdks 2>$null | ForEach-Object { ($_ -split '\s+')[0] }) -join ', '
+    if ($installed) {
+        Write-Host ".NET 10 SDK is required (found: $installed)." -ForegroundColor Yellow
+    } else {
+        Write-Host ".NET 10 SDK is required." -ForegroundColor Yellow
+    }
+}
+
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue) -or -not (Test-DotNet10Sdk)) {
     if (Confirm-Yes "Install the .NET 10 SDK now (winget)?") {
         winget install --id Microsoft.DotNet.SDK.10 -e --accept-source-agreements --accept-package-agreements
-        $env:PATH = "$env:ProgramFiles\dotnet;$env:PATH"
+        Refresh-DotNetPath
     }
-    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
-        Write-Error "The .NET SDK is still not available. Close and reopen your terminal, then re-run ./run.ps1."
+    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue) -or -not (Test-DotNet10Sdk)) {
+        Write-Error "The .NET 10 SDK is still not available. Close and reopen your terminal, then re-run ./run.ps1."
         exit 1
     }
 }
@@ -28,7 +47,7 @@ if (-not (Get-Command aspire -ErrorAction SilentlyContinue)) {
     Write-Host "The Aspire CLI is not installed." -ForegroundColor Yellow
     if (Confirm-Yes "Install it now (dotnet tool install -g aspire.cli)?") {
         dotnet tool install -g aspire.cli
-        $env:PATH = "$HOME\.dotnet\tools;$env:PATH"
+        Refresh-DotNetPath
     }
     if (-not (Get-Command aspire -ErrorAction SilentlyContinue)) {
         Write-Error "The 'aspire' CLI is still not available. Close and reopen your terminal, then re-run ./run.ps1."

@@ -10,15 +10,36 @@ confirm_yes() { # $1 = question
   [[ -z "$ans" || "$ans" =~ ^([yY]|yes|[oO]|oui)$ ]]
 }
 
+has_dotnet_10_sdk() {
+  dotnet --list-sdks 2>/dev/null | grep -qE '^10\.'
+}
+
+refresh_dotnet_path() {
+  export PATH="$HOME/.dotnet:$HOME/.dotnet/tools:$PATH"
+}
+
 # --- .NET 10 SDK ---
 if ! command -v dotnet >/dev/null 2>&1; then
   echo "The .NET SDK is not installed."
+elif ! has_dotnet_10_sdk; then
+  installed=$(dotnet --list-sdks 2>/dev/null | awk '{print $1}' | paste -sd, -)
+  if [[ -n "$installed" ]]; then
+    echo ".NET 10 SDK is required (found: $installed)."
+  else
+    echo ".NET 10 SDK is required."
+  fi
+fi
+
+if ! command -v dotnet >/dev/null 2>&1 || ! has_dotnet_10_sdk; then
   if confirm_yes "Install the .NET 10 SDK now (official dotnet-install script, into ~/.dotnet)?"; then
     curl -fsSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
-    export PATH="$HOME/.dotnet:$HOME/.dotnet/tools:$PATH"
+    refresh_dotnet_path
     echo 'Add this to your shell profile to make it permanent: export PATH="$HOME/.dotnet:$HOME/.dotnet/tools:$PATH"'
   fi
-  command -v dotnet >/dev/null 2>&1 || { echo "The .NET SDK is still not available. Open a new terminal (or fix PATH) and re-run ./run.sh." >&2; exit 1; }
+  command -v dotnet >/dev/null 2>&1 && has_dotnet_10_sdk || {
+    echo "The .NET 10 SDK is still not available. Open a new terminal (or fix PATH) and re-run ./run.sh." >&2
+    exit 1
+  }
 fi
 
 # --- Aspire CLI ---
@@ -26,7 +47,7 @@ if ! command -v aspire >/dev/null 2>&1; then
   echo "The Aspire CLI is not installed."
   if confirm_yes "Install it now (dotnet tool install -g aspire.cli)?"; then
     dotnet tool install -g aspire.cli
-    export PATH="$HOME/.dotnet/tools:$PATH"
+    refresh_dotnet_path
   fi
   command -v aspire >/dev/null 2>&1 || { echo "The 'aspire' CLI is still not available. Open a new terminal (or fix PATH) and re-run ./run.sh." >&2; exit 1; }
 fi
