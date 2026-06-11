@@ -10,6 +10,7 @@
     "decks": { "Enabled": true },
     "collection": { "Enabled": true },
     "website": { "Enabled": true },
+    "uniques": { "Enabled": true },
     "cards": { "Enabled": false }
   }
 }

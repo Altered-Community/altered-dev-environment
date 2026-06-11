@@ -45,6 +45,7 @@ var repoUrls = new Dictionary<string, string>
     ["altered-core-collection-api"] = "https://github.com/Altered-Community/altered-core-collection-api.git",
     ["alteredcore-website"] = "https://github.com/Altered-Community/alteredcore-website.git",
     ["altered-deckbuilder-poc-v2"] = "https://github.com/Altered-Community/altered-deckbuilder-poc-v2.git",
+    ["uniques-search-api"] = "https://github.com/Altered-Re-Union/uniques-search-api.git",
 };
 
 // Handles to cross-referenced resources, assigned as each service is mounted, so
@@ -452,6 +453,47 @@ if (Enabled("website"))
             }
         }
     });
+}
+
+// ===========================================================================
+// uniques — uniques-search-api (local; the Altered-Re-Union fork of Taum/rust-cards-api).
+// A Rust/Axum in-memory search engine over the Altered "Unique" cards. NOTE: this is
+// NOT the prod cards API — it has its own
+// contract (/api/v2/cards, /api/v2/card/{ref}, /api/v2/effects) and only covers
+// Unique characters, so it does NOT replace ALTERED_CORE_URL/CARDS_API_URL. It's
+// the simplest service here: no DB, no Keycloak, no seed, nothing in DbGate.
+//
+// The repo's own Dockerfile is PROD-only (it COPYs a deployment/production.toml
+// the repo doesn't ship, and bakes a no-index image), so we build a DEV image
+// from uniques/ and bind-mount the source like decks/collection. Config is driven
+// purely by env (config.rs honours PORT/INDEX_PATH as overrides; per-env tomls are
+// optional, default.toml ships in the source), so no custom toml is needed. The
+// ~270 MB prebuilt index is downloaded once into a volume by the entrypoint (the
+// binary loads it from disk and won't fetch it itself). The server binds
+// 0.0.0.0:$PORT, so it's reachable on the Aspire network by its resource name —
+// future consumers (website, decks-api) can point at http://altered-uniques-api:8080
+// with no change here (add CORS to the Rust service only if a browser calls it
+// directly).
+// ===========================================================================
+if (Enabled("uniques"))
+{
+    var uniquesRepo = Repo("uniques-search-api");
+
+    builder.AddDockerfile("altered-uniques-api", Path.Combine(appHostDir, "uniques"))
+        .WithBindMount(uniquesRepo, "/app")
+        // target/ (cargo build cache) and build/ (the downloaded index) in
+        // container-managed volumes — they shadow the host checkout's subpaths, so
+        // the first build is slow then cached, and the index persists across
+        // restarts. Same idea as decks/collection's vendor/ volume.
+        .WithVolume("altered-uniques-api-target", "/app/target")
+        .WithVolume("altered-uniques-index", "/app/build")
+        .WithHttpEndpoint(port: 8003, targetPort: 8080, name: "http")
+        // config.rs honours these as legacy overrides, so no custom toml is needed.
+        .WithEnvironment("PORT", "8080")
+        .WithEnvironment("INDEX_PATH", "/app/build/full_index.tar.zst")
+        // Dashboard link: a friendly *.local.gd host (resolves to 127.0.0.1 -> the
+        // Aspire proxy on :8003) hitting a tiny sample query.
+        .WithUrl("http://uniques.altered.local.gd:8003/api/v2/cards?limit=1", "cards (sample)");
 }
 
 // ===========================================================================

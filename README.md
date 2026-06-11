@@ -29,6 +29,7 @@ is also printed in the console).
 | `altered-decks-api` | http://decks.altered.local.gd:8001 (or http://localhost:8001) | local | Symfony/FrankenPHP + Postgres; admin at `/admin/login` |
 | `altered-collection-api` | http://collection.altered.local.gd:8002 (or http://localhost:8002) | local | Symfony/API Platform/FrankenPHP + Postgres; docs at `/api/docs` |
 | `altered-website`   | http://website.altered.local.gd:18181 (or http://localhost:18181) | local | Plain PHP/Apache + MariaDB; Keycloak SSO via the `main-site` client |
+| `altered-uniques-api` | http://uniques.altered.local.gd:8003 (or http://localhost:8003) | local | Rust in-memory search over **Unique** cards (`/api/v2/*`); no DB/auth. Standalone — NOT the prod cards API |
 | `altered-dbgate`    | http://localhost:18182            | local | One web DB client for **all** project DBs (decks + collection Postgres, website MariaDB) |
 | cards               | https://cards.alteredcore.org     | **prod** | decks (and the website) read cards from prod |
 
@@ -113,6 +114,46 @@ on start (entrypoint); the DB persists in the `altered-collection-pg-data` volum
 
 The local **website** points its `COLLECTION_API_URL` at this service (over the
 Aspire network), so the collection features use it — though the DB starts empty.
+
+### uniques (uniques-search-api)
+
+`altered-uniques-api` is [Altered-Re-Union/uniques-search-api](https://github.com/Altered-Re-Union/uniques-search-api)
+(the Altered-Re-Union fork of [Taum/rust-cards-api](https://github.com/Taum/rust-cards-api)),
+a Rust in-memory search engine over the Altered **Unique** cards. It is **not** the
+prod cards API: it has its own contract (`/api/v2/cards`, `/api/v2/card/{reference}`,
+`/api/v2/effects`) and only covers Unique characters, so it does **not** replace the
+`cards.alteredcore.org` source the other services read. It runs standalone for now —
+nothing else is wired to it yet (future consumers reach it at
+`http://altered-uniques-api:8080` over the Aspire network).
+
+It's the simplest service in the stack — no database, no Keycloak, no seed, nothing
+in DbGate. Two wrinkles are handled here rather than upstream:
+
+- **Build** — the repo ships only a prod Dockerfile (it `COPY`s a
+  `deployment/production.toml` that isn't committed, and bakes a no-index image), so
+  the dev scaffolding lives here in [uniques/](uniques/): a thin `rust:1.86` image
+  whose entrypoint downloads the index, then runs `cargo run -p uniques-http-api
+  --release`. The AppHost bind-mounts the repo source at `/app` and keeps the cargo
+  build cache in the `altered-uniques-api-target` volume (first build is slow, like
+  decks; later starts are fast).
+- **Index** — the server loads a ~270 MB prebuilt card index from disk (it doesn't
+  fetch it itself). The entrypoint downloads `full_index.tar.zst` from
+  `storage.googleapis.com/taum-reunion-public` into the `altered-uniques-index` volume
+  on first start only; the loader reads the archive directly (no extraction). Wipe
+  that volume to re-download.
+
+Config is driven entirely by env (`PORT`, `INDEX_PATH`) — the app's per-environment
+toml files are optional, so no config file is bind-mounted. The `[formats]` source
+(needed by `/api/v2/effects` and the `format=` filter) is a separate artifact and is
+**not** wired yet, so those stay disabled; card search works from the index alone.
+
+To re-download the index / rebuild this service from scratch — **without touching any
+project DB** — wipe its own two volumes (the downloaded index + the cargo build cache)
+and restart:
+
+```sh
+docker volume rm altered-uniques-index altered-uniques-api-target
+```
 
 ### dbgate
 
