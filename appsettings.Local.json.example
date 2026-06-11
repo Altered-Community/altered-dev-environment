@@ -11,6 +11,7 @@
     "collection": { "Enabled": true },
     "website": { "Enabled": true },
     "uniques": { "Enabled": true },
+    "uniques-ui": { "Enabled": true },
     "cards": { "Enabled": false }
   }
 }

@@ -60,6 +60,10 @@ IResource? decksPgResource = null;
 IResource? collectionPgResource = null;
 IResource? websiteDbResource = null;
 
+// The uniques API resource, captured so the demo-ui can declare a graph relationship to
+// it (browser-side runtime dependency — edge only, no startup gating).
+IResource? uniquesApiResource = null;
+
 // ===========================================================================
 // auth — Keycloak (local), built from AlteredAuth/build/Dockerfile so it carries
 // the custom "unique-attribute" provider (pseudo uniqueness) + Altered themes.
@@ -479,7 +483,7 @@ if (Enabled("uniques"))
 {
     var uniquesRepo = Repo("uniques-search-api");
 
-    builder.AddDockerfile("altered-uniques-api", Path.Combine(appHostDir, "uniques"))
+    var uniquesApi = builder.AddDockerfile("altered-uniques-api", Path.Combine(appHostDir, "uniques"))
         .WithBindMount(uniquesRepo, "/app")
         // target/ (cargo build cache) and build/ (the downloaded index) in
         // container-managed volumes — they shadow the host checkout's subpaths, so
@@ -494,6 +498,43 @@ if (Enabled("uniques"))
         // Dashboard link: a friendly *.local.gd host (resolves to 127.0.0.1 -> the
         // Aspire proxy on :8003) hitting a tiny sample query.
         .WithUrl("http://uniques.altered.local.gd:8003/api/v2/cards?limit=1", "cards (sample)");
+
+    uniquesApiResource = uniquesApi.Resource;
+}
+
+// ===========================================================================
+// uniques-ui — uniques-search-api/demo-ui (local). A Vite 6 + React 19 SPA demo for
+// the uniques API, run via the Vite dev server (HMR). Browser-only: it calls the API
+// directly (the API sets CorsLayer::permissive), so VITE_API_BASE_URL points at the
+// browser-reachable API URL — no proxy, no CORS work. The repo ships no Dockerfile for
+// it, so a dev image lives in uniques-ui/; demo-ui/ is bind-mounted and node_modules
+// lives in a volume (npm ci on first start).
+//
+// We publish Vite's port directly with -p (like Keycloak), NOT through the Aspire
+// proxy, and run Vite on the same port we publish (8004) so the HMR websocket — which
+// the browser opens to the page's own host:port — lines up. Open it at
+// http://localhost:8004 (Vite's host allowlist permits localhost; the *.local.gd host
+// would need server.allowedHosts). No WaitFor: the SPA needs no backend to start
+// serving, and not blocking on the API's long first build keeps the UI available fast.
+// ===========================================================================
+if (Enabled("uniques-ui"))
+{
+    var uniquesUiRepo = Repo("uniques-search-api");
+
+    var uniquesUi = builder.AddDockerfile("altered-uniques-ui", Path.Combine(appHostDir, "uniques-ui"))
+        .WithBindMount(Path.Combine(uniquesUiRepo, "demo-ui"), "/app")
+        .WithVolume("altered-uniques-ui-node-modules", "/app/node_modules")
+        // Publish Vite on 0.0.0.0:8004 directly (bypass the Aspire proxy) so the HMR
+        // websocket works; internal port == published port so the HMR client lines up.
+        .WithContainerRuntimeArgs("-p", "0.0.0.0:8004:8004")
+        // Must be reachable FROM THE BROWSER (not the Aspire alias). Vite reads VITE_-
+        // prefixed vars from the environment (see demo-ui/README).
+        .WithEnvironment("VITE_API_BASE_URL", "http://localhost:8003")
+        .WithUrl("http://localhost:8004/", "demo-ui");
+
+    // Express the runtime (browser-side) dependency on the API as a graph edge ONLY —
+    // no startup gating (same mechanism DbGate uses for the DBs). Null if uniques is off.
+    if (uniquesApiResource is not null) uniquesUi.WithReferenceRelationship(uniquesApiResource);
 }
 
 // ===========================================================================

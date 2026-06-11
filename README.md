@@ -30,6 +30,7 @@ is also printed in the console).
 | `altered-collection-api` | http://collection.altered.local.gd:8002 (or http://localhost:8002) | local | Symfony/API Platform/FrankenPHP + Postgres; docs at `/api/docs` |
 | `altered-website`   | http://website.altered.local.gd:18181 (or http://localhost:18181) | local | Plain PHP/Apache + MariaDB; Keycloak SSO via the `main-site` client |
 | `altered-uniques-api` | http://uniques.altered.local.gd:8003 (or http://localhost:8003) | local | Rust in-memory search over **Unique** cards (`/api/v2/*`); no DB/auth. Standalone — NOT the prod cards API |
+| `altered-uniques-ui` | http://localhost:8004             | local | Vite/React demo SPA for the uniques API (Vite dev server, HMR; browser → API direct) |
 | `altered-dbgate`    | http://localhost:18182            | local | One web DB client for **all** project DBs (decks + collection Postgres, website MariaDB) |
 | cards               | https://cards.alteredcore.org     | **prod** | decks (and the website) read cards from prod |
 
@@ -163,6 +164,22 @@ and restart:
 ```sh
 docker volume rm altered-uniques-index altered-uniques-api-target
 ```
+
+### uniques-ui (demo-ui)
+
+`altered-uniques-ui` runs the repo's `demo-ui/` — a Vite + React SPA for the uniques API
+— via the Vite **dev server** (HMR). The repo ships no Dockerfile for it, so the dev
+image lives in [uniques-ui/](uniques-ui/): `demo-ui/` is bind-mounted, `node_modules`
+lives in the `altered-uniques-ui-node-modules` volume (`npm ci` on first start), and
+`npm run dev` serves it.
+
+The SPA calls the API **straight from the browser** (the API sets `CorsLayer::permissive`),
+so `VITE_API_BASE_URL` points at the browser-reachable API (`http://localhost:8003`) — no
+Vite proxy, no CORS work. Vite's port is published directly (`-p`, like Keycloak) on the
+same internal/external port (8004) so the HMR websocket lines up. **Open it at
+http://localhost:8004** — Vite's host allowlist permits `localhost` but not the
+`*.local.gd` host (that would need `server.allowedHosts`). Needs the `uniques` service
+running to have an API to talk to.
 
 ### dbgate
 
