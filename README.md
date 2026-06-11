@@ -143,9 +143,18 @@ in DbGate. Two wrinkles are handled here rather than upstream:
   that volume to re-download.
 
 Config is driven entirely by env (`PORT`, `INDEX_PATH`) — the app's per-environment
-toml files are optional, so no config file is bind-mounted. The `[formats]` source
-(needed by `/api/v2/effects` and the `format=` filter) is a separate artifact and is
-**not** wired yet, so those stay disabled; card search works from the index alone.
+toml files are optional, so no config file is bind-mounted.
+
+**Formats (not wired yet).** A "format" (e.g. `standard`) is a curated card subset — a
+small JSON allowlist/denylist of card references, loaded from a `build/formats/` dir
+(`manifest.json` + one file per format) and compiled against the index. It's **separate
+from the index**: the prebuilt bundle ships none, and nothing in the repo generates one,
+so the `[formats]` section stays off. It gates **only** the `format=` filter on
+`/api/v2/cards` (otherwise `400 unknown format`) — plain card search and `/api/v2/effects`
+work from the index alone. To enable it once we have the files: make a `build/formats/`
+available to the container (mount it, or download it in the entrypoint like the index)
+and turn on `[formats]` — a few lines. Open question: where those definitions come from
+(hand-authored, or published somewhere by Re-Union).
 
 To re-download the index / rebuild this service from scratch — **without touching any
 project DB** — wipe its own two volumes (the downloaded index + the cargo build cache)
