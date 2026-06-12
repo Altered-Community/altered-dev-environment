@@ -147,16 +147,18 @@ Config is driven by env + the app's own `default.toml` (`PORT` override; the ind
 comes from `default.toml`) — its per-environment
 toml files are optional, so no config file is bind-mounted.
 
-**Formats (not wired yet).** A "format" (e.g. `standard`) is a curated card subset — a
-small JSON allowlist/denylist of card references, loaded from a `build/formats/` dir
-(`manifest.json` + one file per format) and compiled against the index. It's **separate
-from the index**: the prebuilt bundle ships none, and nothing in the repo generates one,
-so the `[formats]` section stays off. It gates **only** the `format=` filter on
-`/api/v2/cards` (otherwise `400 unknown format`) — plain card search and `/api/v2/effects`
-work from the index alone. To enable it once we have the files: make a `build/formats/`
-available to the container (mount it, or download it in the entrypoint like the index)
-and turn on `[formats]` — a few lines. Open question: where those definitions come from
-(hand-authored, or published somewhere by Re-Union).
+**Formats.** A "format" (e.g. `frontier`, `living-legend`) is a curated card subset — a
+JSON allowlist (`included_refs`) or denylist (`excluded_sets` / `excluded_refs`) of card
+references, loaded from a `formats/` dir (`manifest.json` + one file per format) and
+compiled against the index. Two dev formats ship in the upstream repo's `formats/`:
+**`frontier`** (50 random cards per faction, include) and **`living-legend`** (exclude the
+CORE/COREKS sets + 10 random cards per faction). The dev-env enables them via a
+bind-mounted [`uniques/local.toml`](uniques/local.toml) (`[formats]` source `/app/formats`)
+with **hot-reload** polling (5 s). Query `?format=frontier` / `?format=living-legend`; an
+unknown id → `400 unknown format`, a format that fails to load → `500` (check the logs).
+
+**Hot-reload note:** the poller compares the manifest's per-id `version`, so to pick up an
+edit you must bump `version` in BOTH the format file and its `manifest.json` row.
 
 To re-download the index / rebuild this service from scratch — **without touching any
 project DB** — wipe its own two volumes (the downloaded index + the cargo build cache)

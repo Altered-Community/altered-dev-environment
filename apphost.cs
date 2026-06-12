@@ -486,6 +486,12 @@ if (Enabled("uniques"))
 
     var uniquesApi = builder.AddDockerfile("altered-uniques-api", Path.Combine(uniquesRepo, "docker", "dev"))
         .WithBindMount(uniquesRepo, "/app")
+        // Dev formats wiring: a dev-env-owned local.toml bind-mounted over the checkout's
+        // config/local.toml — enables [formats] (source = /app/formats = the repo's
+        // committed formats/ dir) with hot-reload polling. Env alone can't set the reload
+        // interval, only the toml can.
+        .WithBindMount(Path.Combine(appHostDir, "uniques", "local.toml"),
+            "/app/uniques-http-api/config/local.toml", isReadOnly: true)
         // target/ (cargo build cache) and build/ (the downloaded index) in
         // container-managed volumes — they shadow the host checkout's subpaths, so
         // the first build is slow then cached, and the index persists across
