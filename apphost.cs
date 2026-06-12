@@ -509,9 +509,9 @@ if (Enabled("uniques"))
 // uniques-ui — uniques-search-api/demo-ui (local). A Vite 6 + React 19 SPA demo for
 // the uniques API, run via the Vite dev server (HMR). Browser-only: it calls the API
 // directly (the API sets CorsLayer::permissive), so VITE_API_BASE_URL points at the
-// browser-reachable API URL — no proxy, no CORS work. The repo ships no Dockerfile for
-// it, so a dev image lives in uniques-ui/; demo-ui/ is bind-mounted and node_modules
-// lives in a volume (npm ci on first start).
+// browser-reachable API URL — no proxy, no CORS work. The repo ships the dev image at
+// demo-ui/docker/dev/; demo-ui/ is bind-mounted and node_modules lives in a volume
+// (npm ci on first start).
 //
 // We publish Vite's port directly with -p (like Keycloak), NOT through the Aspire
 // proxy, and run Vite on the same port we publish (8004) so the HMR websocket — which
@@ -524,7 +524,7 @@ if (Enabled("uniques-ui"))
 {
     var uniquesUiRepo = Repo("uniques-search-api");
 
-    var uniquesUi = builder.AddDockerfile("altered-uniques-ui", Path.Combine(appHostDir, "uniques-ui"))
+    var uniquesUi = builder.AddDockerfile("altered-uniques-ui", Path.Combine(uniquesUiRepo, "demo-ui", "docker", "dev"))
         .WithBindMount(Path.Combine(uniquesUiRepo, "demo-ui"), "/app")
         .WithVolume("altered-uniques-ui-node-modules", "/app/node_modules")
         // Publish Vite on 0.0.0.0:8004 directly (bypass the Aspire proxy) so the HMR

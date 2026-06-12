@@ -169,10 +169,11 @@ docker volume rm altered-uniques-index altered-uniques-api-target
 ### uniques-ui (demo-ui)
 
 `altered-uniques-ui` runs the repo's `demo-ui/` — a Vite + React SPA for the uniques API
-— via the Vite **dev server** (HMR). The repo ships no Dockerfile for it, so the dev
-image lives in [uniques-ui/](uniques-ui/): `demo-ui/` is bind-mounted, `node_modules`
-lives in the `altered-uniques-ui-node-modules` volume (`npm ci` on first start), and
-`npm run dev` serves it.
+— via the Vite **dev server** (HMR). The dev image lives in the upstream repo at
+`demo-ui/docker/dev/Dockerfile`; the AppHost points the `uniques-ui` resource at it,
+bind-mounts `demo-ui/` at `/app`, keeps `node_modules` in the
+`altered-uniques-ui-node-modules` volume (`npm ci` on first start), and `npm run dev`
+serves it.
 
 The SPA calls the API **straight from the browser** (the API sets `CorsLayer::permissive`),
 so `VITE_API_BASE_URL` points at the browser-reachable API (`http://localhost:8003`) — no
