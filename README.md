@@ -179,7 +179,9 @@ Vite proxy, no CORS work. Vite's port is published directly (`-p`, like Keycloak
 same internal/external port (8004) so the HMR websocket lines up. **Open it at
 http://localhost:8004** — Vite's host allowlist permits `localhost` but not the
 `*.local.gd` host (that would need `server.allowedHosts`). Needs the `uniques` service
-running to have an API to talk to.
+running to have an API to talk to. The API URL comes from the `VITE_API_BASE_URL` env
+var — don't shadow it with a blank value in a `demo-ui/.env` / `.env.local`, which would
+route calls through Vite's unused `:8234` proxy instead.
 
 ### dbgate
 

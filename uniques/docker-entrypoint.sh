@@ -20,6 +20,9 @@ if [ ! -f "$INDEX_FILE" ]; then
   # Download to a .partial then rename: an interrupted download must not leave a
   # truncated file that looks "present" (and fails to load) on the next start.
   curl -fSL "$INDEX_URL" -o "$INDEX_FILE.partial"
+  # Guard against a 0-byte / truncated "success": don't promote (and then "skip
+  # download" forever on the next start) an unusable file.
+  [ -s "$INDEX_FILE.partial" ] || { echo "[uniques] downloaded index is empty — aborting"; rm -f "$INDEX_FILE.partial"; exit 1; }
   mv "$INDEX_FILE.partial" "$INDEX_FILE"
   echo "[uniques] index downloaded."
 else

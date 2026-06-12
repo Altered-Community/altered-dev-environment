@@ -469,15 +469,16 @@ if (Enabled("website"))
 //
 // The repo's own Dockerfile is PROD-only (it COPYs a deployment/production.toml
 // the repo doesn't ship, and bakes a no-index image), so we build a DEV image
-// from uniques/ and bind-mount the source like decks/collection. Config is driven
-// purely by env (config.rs honours PORT/INDEX_PATH as overrides; per-env tomls are
-// optional, default.toml ships in the source), so no custom toml is needed. The
+// from uniques/ and bind-mount the source like decks/collection. Config is driven by
+// env + the app's own default.toml (config.rs honours a PORT override; per-env tomls
+// are optional, and default.toml already ships the right index path), so no custom
+// toml is needed. The
 // ~270 MB prebuilt index is downloaded once into a volume by the entrypoint (the
 // binary loads it from disk and won't fetch it itself). The server binds
 // 0.0.0.0:$PORT, so it's reachable on the Aspire network by its resource name —
 // future consumers (website, decks-api) can point at http://altered-uniques-api:8080
-// with no change here (add CORS to the Rust service only if a browser calls it
-// directly).
+// with no change here. CORS is already CorsLayer::permissive in the app's http.rs, so
+// even browser-direct callers (the demo-ui) work out of the box.
 // ===========================================================================
 if (Enabled("uniques"))
 {
@@ -492,9 +493,11 @@ if (Enabled("uniques"))
         .WithVolume("altered-uniques-api-target", "/app/target")
         .WithVolume("altered-uniques-index", "/app/build")
         .WithHttpEndpoint(port: 8003, targetPort: 8080, name: "http")
-        // config.rs honours these as legacy overrides, so no custom toml is needed.
+        // PORT is honoured by config.rs (no custom toml needed). The index path is left
+        // to the app's default.toml (./build/full_index.tar.zst -> /app/build/...), which
+        // the entrypoint downloads into — setting INDEX_PATH too would just duplicate it
+        // and log a "prefer index.path in config" warning on every start.
         .WithEnvironment("PORT", "8080")
-        .WithEnvironment("INDEX_PATH", "/app/build/full_index.tar.zst")
         // Dashboard link: a friendly *.local.gd host (resolves to 127.0.0.1 -> the
         // Aspire proxy on :8003) hitting a tiny sample query.
         .WithUrl("http://uniques.altered.local.gd:8003/api/v2/cards?limit=1", "cards (sample)");
