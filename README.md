@@ -128,22 +128,23 @@ nothing else is wired to it yet (future consumers reach it at
 `http://altered-uniques-api:8080` over the Aspire network).
 
 It's the simplest service in the stack — no database, no Keycloak, no seed, nothing
-in DbGate. Two wrinkles are handled here rather than upstream:
+in DbGate. Two things to know:
 
-- **Build** — the repo ships only a prod Dockerfile (it `COPY`s a
-  `deployment/production.toml` that isn't committed, and bakes a no-index image), so
-  the dev scaffolding lives here in [uniques/](uniques/): a thin `rust:1.86` image
-  whose entrypoint downloads the index, then runs `cargo run -p uniques-http-api
-  --release`. The AppHost bind-mounts the repo source at `/app` and keeps the cargo
-  build cache in the `altered-uniques-api-target` volume (first build is slow, like
-  decks; later starts are fast).
+- **Build** — the repo's root Dockerfile is prod-only (a multi-stage Cloud Run build
+  that bakes the binary), so the repo ships a separate dev image at
+  `docker/dev/Dockerfile`: a thin `rust:1.86` image whose entrypoint downloads the
+  index, then runs `cargo run -p uniques-http-api --release`. The AppHost points the
+  `uniques` resource at that Dockerfile, bind-mounts the repo source at `/app`, and
+  keeps the cargo build cache in the `altered-uniques-api-target` volume (first build
+  is slow, like decks; later starts are fast).
 - **Index** — the server loads a ~270 MB prebuilt card index from disk (it doesn't
   fetch it itself). The entrypoint downloads `full_index.tar.zst` from
   `storage.googleapis.com/taum-reunion-public` into the `altered-uniques-index` volume
   on first start only; the loader reads the archive directly (no extraction). Wipe
   that volume to re-download.
 
-Config is driven entirely by env (`PORT`, `INDEX_PATH`) — the app's per-environment
+Config is driven by env + the app's own `default.toml` (`PORT` override; the index path
+comes from `default.toml`) — its per-environment
 toml files are optional, so no config file is bind-mounted.
 
 **Formats (not wired yet).** A "format" (e.g. `standard`) is a curated card subset — a

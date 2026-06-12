@@ -467,9 +467,9 @@ if (Enabled("website"))
 // Unique characters, so it does NOT replace ALTERED_CORE_URL/CARDS_API_URL. It's
 // the simplest service here: no DB, no Keycloak, no seed, nothing in DbGate.
 //
-// The repo's own Dockerfile is PROD-only (it COPYs a deployment/production.toml
-// the repo doesn't ship, and bakes a no-index image), so we build a DEV image
-// from uniques/ and bind-mount the source like decks/collection. Config is driven by
+// The repo's root Dockerfile is PROD-only (a multi-stage Cloud Run build that bakes
+// the binary), so the repo ships a separate DEV image at docker/dev/Dockerfile that we
+// build and bind-mount the source into like decks/collection. Config is driven by
 // env + the app's own default.toml (config.rs honours a PORT override; per-env tomls
 // are optional, and default.toml already ships the right index path), so no custom
 // toml is needed. The
@@ -484,7 +484,7 @@ if (Enabled("uniques"))
 {
     var uniquesRepo = Repo("uniques-search-api");
 
-    var uniquesApi = builder.AddDockerfile("altered-uniques-api", Path.Combine(appHostDir, "uniques"))
+    var uniquesApi = builder.AddDockerfile("altered-uniques-api", Path.Combine(uniquesRepo, "docker", "dev"))
         .WithBindMount(uniquesRepo, "/app")
         // target/ (cargo build cache) and build/ (the downloaded index) in
         // container-managed volumes — they shadow the host checkout's subpaths, so
