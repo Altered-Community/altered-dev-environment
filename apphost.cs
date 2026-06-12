@@ -420,13 +420,11 @@ if (Enabled("website"))
             url.Url = "/";
         })
         .WithContainerRuntimeArgs("--add-host", "auth.altered.local.gd:host-gateway")
+        // Only wait for its OWN database: the website talks to Keycloak, decks-api
+        // and collection-api server-side only when a request comes in (login, deck
+        // calls, …), never at boot — so it can start in parallel with them rather
+        // than being gated on their (slower) readiness.
         .WaitFor(websiteDb);
-
-    // Start after Keycloak (server-side OAuth) and decks-api (server-side deck
-    // calls) when those services are enabled.
-    if (authApp is not null) website.WaitFor(authApp);
-    if (decksApp is not null) website.WaitFor(decksApp);
-    if (collectionApp is not null) website.WaitFor(collectionApp);
 
     // Group the MariaDB server under the website in the dashboard — see decks.
     websiteDb.WithParentRelationship(website.Resource);
