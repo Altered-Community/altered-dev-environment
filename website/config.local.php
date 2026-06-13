@@ -71,7 +71,13 @@ define('GITHUB_REPO', 'owner/community-feedback');
 define('CARDS_API_URL',     'https://cards.alteredcore.org');
 define('DECKS_API_URL',     'http://altered-decks-api:80');
 define('CDN_URL',           'https://cdn.alteredcore.org');
-define('OWNERSHIP_API_URL', 'https://ownership.altered.re/');
+// Server-side proxy target: reach the ownership container by its Aspire network
+// alias (host 8003 -> container 8080), same pattern as decks/collection above.
+// The browser-facing URL (ownership.altered.local.gd:8003) can't be used here —
+// inside the website container it resolves to the container itself.
+define('OWNERSHIP_API_URL', 'http://altered-ownership:8080');
+// Browser-facing ownership app root (the "Digital ownership" redirect link points here).
+define('OWNERSHIP_WEB_URL', 'http://ownership.altered.local.gd:8003');
 define('COLLECTION_API_URL', 'http://altered-collection-api:80');
 define('COLLECTION_USE_API', true);
 
