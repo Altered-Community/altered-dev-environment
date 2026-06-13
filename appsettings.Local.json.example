@@ -9,6 +9,7 @@
     "auth": { "Enabled": true },
     "decks": { "Enabled": true },
     "collection": { "Enabled": true },
+    "ownership": { "Enabled": false },
     "website": { "Enabled": true },
     "uniques": { "Enabled": true },
     "uniques-ui": { "Enabled": true },

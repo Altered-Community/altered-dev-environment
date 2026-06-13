@@ -1,6 +1,7 @@
 #:sdk Aspire.AppHost.Sdk@13.3.5
 #:package Aspire.Hosting.PostgreSQL@13.3.5
 #:package Aspire.Hosting.MySql@13.3.5
+#:package Aspire.Hosting.Redis@13.3.5
 #:package Npgsql@10.0.3
 #:package MySqlConnector@2.4.0
 
@@ -43,6 +44,7 @@ var repoUrls = new Dictionary<string, string>
     ["altered-core-decks-api"] = "https://github.com/Altered-Community/altered-core-decks-api.git",
     ["altered-core-cards-api"] = "https://github.com/Altered-Community/altered-core-cards-api.git",
     ["altered-core-collection-api"] = "https://github.com/Altered-Community/altered-core-collection-api.git",
+    ["AlteredOwnership"] = "https://github.com/Altered-Re-Union/AlteredOwnership.git",
     ["alteredcore-website"] = "https://github.com/Altered-Community/alteredcore-website.git",
     ["altered-deckbuilder-poc-v2"] = "https://github.com/Altered-Community/altered-deckbuilder-poc-v2.git",
     ["uniques-search-api"] = "https://github.com/Altered-Re-Union/uniques-search-api.git",
@@ -152,7 +154,6 @@ if (Enabled("decks"))
     // Postgres instance shows in the graph (the database stays fully functional).
     var decksDb = decksPg.AddDatabase("altered-deck", "altered_deck")
         .WithInitialState(Hidden("Database"));
-    decksPgResource = decksPg.Resource;
 
     // decks-api wants a libpq URL; the host is the postgres resource's network
     // alias (resource name) on the Aspire network, internal port 5432.
@@ -194,6 +195,11 @@ if (Enabled("decks"))
         .WithUrl("http://decks.altered.local.gd:8001/admin/login", "admin");
 
     decksApp = decksApi;
+
+    // Group the Postgres server (and its hidden DB) under the API in the dashboard's
+    // Resources tree, and render the API->DB edge in the graph. The DB node itself is
+    // hidden, so parenting the visible *server* is what links/groups them.
+    decksPg.WithParentRelationship(decksApi.Resource);
 
     // Auto-seed dev admins so they survive a DB reset and a fresh start: an
     // idempotent UPSERT keyed on the user's FIXED Keycloak id (= JWT "sub"). It
@@ -260,7 +266,6 @@ if (Enabled("collection"))
         .WithDataVolume("altered-collection-pg-data");
     var collectionDb = collectionPg.AddDatabase("altered-collection", "altered_collection")
         .WithInitialState(Hidden("Database")); // hide the DB node; instance stays visible
-    collectionPgResource = collectionPg.Resource;
 
     const string collectionDbUrl =
         "postgresql://postgres:altereddev@altered-collection-pg:5432/altered_collection?serverVersion=16&charset=utf8";
@@ -299,6 +304,75 @@ if (Enabled("collection"))
         .WithEnvironment("MERCURE_SUBSCRIBER_JWT_ALG", "HS256")
         .WithReference(collectionDb)
         .WaitFor(collectionDb);
+
+    // Group the Postgres server (and its hidden DB) under the API — see decks.
+    collectionPg.WithParentRelationship(collectionApp.Resource);
+}
+
+// ===========================================================================
+// ownership — AlteredOwnership (local). ASP.NET Core (.NET 10) SPA + minimal API,
+// own Postgres + Redis (session ticket store / output cache). Built from the repo's
+// build/Dockerfile `app` stage (the compiled, published server — no source bind
+// mount). Runs with ASPNETCORE_ENVIRONMENT=Development so it (a) applies EF Core
+// migrations on startup, (b) maps the /health endpoint, and (c) accepts plain-HTTP
+// Keycloak metadata + http cookies (prod requires HTTPS). Auth is OIDC code flow
+// via the confidential "ownership-frontend" client; like decks/website it reaches
+// Keycloak server-side at the public *.local.gd URL, so it needs the host-gateway
+// override. Cards metadata is read from prod (matches decks/collection).
+// ===========================================================================
+if (Enabled("ownership"))
+{
+    var ownershipRepo = Repo("AlteredOwnership");
+
+    var ownershipPgPassword = builder.AddParameter("altered-ownership-db-password", "altereddev", secret: true)
+        .WithInitialState(Hidden("Parameter")); // dev secret — keep it out of the graph
+    var ownershipPg = builder.AddPostgres("altered-ownership-pg", password: ownershipPgPassword)
+        .WithDataVolume("altered-ownership-pg-data");
+    // The app expects ConnectionStrings__ownershipdb; the DB name is "ownershipdb"
+    // (Program.cs / Aspire conventions). Hide the database node like the others.
+    var ownershipDb = ownershipPg.AddDatabase("altered-ownership-db", "ownershipdb")
+        .WithInitialState(Hidden("Database"));
+
+    // Redis: session ticket store (RedisTicketStore) + output/distributed cache.
+    // Ephemeral cache, so no data volume. The app reads ConnectionStrings__cache.
+    var ownershipRedis = builder.AddRedis("altered-ownership-redis");
+
+    var ownership = builder.AddDockerfile("altered-ownership", ownershipRepo, "build/Dockerfile", stage: "app")
+        .WithHttpEndpoint(port: 8003, targetPort: 8080, name: "http")
+        // Reach Keycloak (published on 0.0.0.0:18080) from inside the container at
+        // the same URL the browser uses, so OIDC discovery / token / JWKS resolve to
+        // the host gateway rather than the container itself.
+        .WithContainerRuntimeArgs("--add-host", "auth.altered.local.gd:host-gateway")
+        // Development: EF migrations on startup, /health mapped, http metadata + cookies.
+        .WithEnvironment("ASPNETCORE_ENVIRONMENT", "Development")
+        // Connection strings, resolved by Aspire to the container-network host/port
+        // (and generated credentials) at run time — no hardcoded URLs.
+        .WithEnvironment("ConnectionStrings__ownershipdb", ownershipDb)
+        .WithEnvironment("ConnectionStrings__cache", ownershipRedis)
+        // OIDC code flow against the local realm via the confidential frontend client.
+        .WithEnvironment("Keycloak__Authority", $"{AuthUrl}/realms/players")
+        .WithEnvironment("Keycloak__ClientId", "ownership-frontend")
+        .WithEnvironment("Keycloak__ClientSecret", "preprod-ownership-frontend-secret")
+        // AuthBase is browser-facing (CSP form-action + surfaced to the SPA), so it
+        // must be the public *.local.gd URL. ReunionWebBase is just the "back to the
+        // community site" link → point at the local website. Cards stay on prod.
+        .WithEnvironment("ExternalHosts__AuthBase", AuthUrl)
+        .WithEnvironment("ExternalHosts__ReunionWebBase", "http://website.altered.local.gd:18181")
+        .WithEnvironment("ExternalHosts__CardsApiBase", CardsProdUrl)
+        .WaitFor(ownershipDb)
+        .WaitFor(ownershipRedis)
+        .WithHttpHealthCheck("/health")
+        // Friendly dashboard link (resolves to 127.0.0.1 -> the Aspire proxy on
+        // :8003); this host is among the client's seeded redirect URIs / web origins.
+        .WithUrl("http://ownership.altered.local.gd:8003/", "ownership");
+
+    // Start after Keycloak (server-side OIDC) when it's enabled.
+    if (authApp is not null) ownership.WaitFor(authApp);
+
+    // Group the Postgres server (and its hidden DB) + the Redis cache under the app
+    // in the dashboard's Resources tree (and render the edges in the graph) — see decks.
+    ownershipPg.WithParentRelationship(ownership.Resource);
+    ownershipRedis.WithParentRelationship(ownership.Resource);
 }
 
 // ===========================================================================
@@ -334,7 +408,6 @@ if (Enabled("website"))
             "/docker-entrypoint-initdb.d/01-schema.sh",
             isReadOnly: true)
         .WithDataVolume("altered-website-db-data");
-    websiteDbResource = websiteDb.Resource;
 
     // website container — built from the repo Dockerfile (php:7.4-apache), source
     // bind-mounted like the compose. config.local.php is bind-mounted from the
@@ -358,13 +431,14 @@ if (Enabled("website"))
             url.Url = "/";
         })
         .WithContainerRuntimeArgs("--add-host", "auth.altered.local.gd:host-gateway")
+        // Only wait for its OWN database: the website talks to Keycloak, decks-api
+        // and collection-api server-side only when a request comes in (login, deck
+        // calls, …), never at boot — so it can start in parallel with them rather
+        // than being gated on their (slower) readiness.
         .WaitFor(websiteDb);
 
-    // Start after Keycloak (server-side OAuth) and decks-api (server-side deck
-    // calls) when those services are enabled.
-    if (authApp is not null) website.WaitFor(authApp);
-    if (decksApp is not null) website.WaitFor(decksApp);
-    if (collectionApp is not null) website.WaitFor(collectionApp);
+    // Group the MariaDB server under the website in the dashboard — see decks.
+    websiteDb.WithParentRelationship(website.Resource);
 
     // Auto-seed alice as a website admin (mirrors the decks admin seed) so it
     // survives a DB reset / fresh start: an idempotent UPSERT keyed on her FIXED
@@ -437,6 +511,9 @@ if (Enabled("website"))
             {
                 await using var conn = new MySqlConnection(connectionString);
                 await conn.OpenAsync(ct);
+                // NOTE: schema migrations are applied by the website CONTAINER's
+                // entrypoint (docker/entrypoint.sh -> bin/migrate.php), not here. This
+                // seed only inserts rows into base-schema tables.
                 foreach (var sql in statements)
                 {
                     await using var cmd = new MySqlCommand(sql, conn);
@@ -553,7 +630,7 @@ if (Enabled("uniques-ui"))
 // DBs themselves. Connections are pre-seeded read-only via env vars; only the
 // enabled services' DBs are added. Dev credentials match each DB resource.
 // ===========================================================================
-if (Enabled("decks") || Enabled("collection") || Enabled("website"))
+if (Enabled("decks") || Enabled("collection") || Enabled("ownership") || Enabled("website"))
 {
     var dbgateConnections = new List<string>();
     var dbgate = builder.AddContainer("altered-dbgate", "dbgate/dbgate")
@@ -584,6 +661,18 @@ if (Enabled("decks") || Enabled("collection") || Enabled("website"))
             .WithEnvironment("ENGINE_collection", "postgres@dbgate-plugin-postgres");
     }
 
+    if (Enabled("ownership"))
+    {
+        dbgateConnections.Add("ownership");
+        dbgate.WithEnvironment("LABEL_ownership", "ownership (postgres)")
+            .WithEnvironment("SERVER_ownership", "altered-ownership-pg")
+            .WithEnvironment("PORT_ownership", "5432")
+            .WithEnvironment("USER_ownership", "postgres")
+            .WithEnvironment("PASSWORD_ownership", "altereddev")
+            .WithEnvironment("DATABASE_ownership", "ownershipdb")
+            .WithEnvironment("ENGINE_ownership", "postgres@dbgate-plugin-postgres");
+    }
+
     if (Enabled("website"))
     {
         dbgateConnections.Add("website");
@@ -596,15 +685,11 @@ if (Enabled("decks") || Enabled("collection") || Enabled("website"))
             .WithEnvironment("ENGINE_website", "mariadb@dbgate-plugin-mysql");
     }
 
-    // Declare a relationship to each DB server so DbGate shows up linked in the
-    // graph (it's otherwise an island — it connects via its own CONNECTIONS env,
-    // which Aspire can't infer). WithReferenceRelationship adds the edge only, no
-    // env injected. Link to the servers (visible) since the database nodes are
-    // hidden.
-    if (decksPgResource is not null) dbgate.WithReferenceRelationship(decksPgResource);
-    if (collectionPgResource is not null) dbgate.WithReferenceRelationship(collectionPgResource);
-    if (websiteDbResource is not null) dbgate.WithReferenceRelationship(websiteDbResource);
-
+    // DbGate connects to each DB via its own CONNECTIONS env (which Aspire can't
+    // infer), so it has no inferred edges. We deliberately DON'T add reference
+    // relationships to the DB servers: that kept it an isolated node cluttering the
+    // graph. It stays a standalone (root-level) entry in the Resources tab — it's a
+    // cross-cutting tool, not owned by any one app.
     dbgate
         .WithEnvironment("CONNECTIONS", string.Join(",", dbgateConnections));
 }

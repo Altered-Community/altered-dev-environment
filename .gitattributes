@@ -1,0 +1,8 @@
+# Force LF for files that run inside Linux containers / shells.
+# CRLF here breaks Dockerfile heredocs (apt-get update\r) and shell scripts.
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+*.sh            text eol=lf
+*.ini           text eol=lf
+Caddyfile       text eol=lf
+docker-entrypoint.sh text eol=lf
