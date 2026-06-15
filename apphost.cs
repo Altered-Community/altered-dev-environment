@@ -593,8 +593,9 @@ if (Enabled("uniques"))
 // the uniques API, run via the Vite dev server (HMR). Browser-only: it calls the API
 // directly (the API sets CorsLayer::permissive), so VITE_API_BASE_URL points at the
 // browser-reachable API URL — no proxy, no CORS work. The repo ships the dev image at
-// demo-ui/docker/dev/; demo-ui/ is bind-mounted and node_modules lives in a volume
-// (npm ci on first start).
+// demo-ui/docker/dev/ (npm ci is baked at build time). demo-ui/ is bind-mounted for
+// HMR; the node_modules volume is seeded from the image (the bind-mount would otherwise
+// shadow the baked node_modules) — no runtime install.
 //
 // We publish Vite's port directly with -p (like Keycloak), NOT through the Aspire
 // proxy, and run Vite on the same port we publish (8004) so the HMR websocket — which
@@ -607,9 +608,20 @@ if (Enabled("uniques-ui"))
 {
     var uniquesUiRepo = Repo("uniques-search-api");
 
-    var uniquesUi = builder.AddDockerfile("altered-uniques-ui", Path.Combine(uniquesUiRepo, "demo-ui", "docker", "dev"))
+    // node_modules is baked into the image; this volume only un-shadows it under the
+    // source bind-mount, seeded from the image. Key the volume name to a hash of
+    // package-lock.json so a dependency change automatically gets a FRESH (re-seeded)
+    // volume — no manual wipe. Stale volumes from older hashes are pruned (best-effort).
+    var nmLock = Path.Combine(uniquesUiRepo, "demo-ui", "package-lock.json");
+    var nmTag = File.Exists(nmLock)
+        ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nmLock)))[..8].ToLowerInvariant()
+        : "default";
+    var nmVolume = $"altered-uniques-ui-node-modules-{nmTag}";
+    PruneStaleVolumes("altered-uniques-ui-node-modules-", keep: nmVolume);
+
+    var uniquesUi = builder.AddDockerfile("altered-uniques-ui", Path.Combine(uniquesUiRepo, "demo-ui"), "docker/dev/Dockerfile")
         .WithBindMount(Path.Combine(uniquesUiRepo, "demo-ui"), "/app")
-        .WithVolume("altered-uniques-ui-node-modules", "/app/node_modules")
+        .WithVolume(nmVolume, "/app/node_modules")
         // Publish Vite on 0.0.0.0:8004 directly (bypass the Aspire proxy) so the HMR
         // websocket works; internal port == published port so the HMR client lines up.
         .WithContainerRuntimeArgs("-p", "0.0.0.0:8004:8004")
@@ -702,6 +714,43 @@ builder.Build().Run();
 
 // Absolute directory containing this apphost.cs file (compile-time path).
 static string AppHostDirectory([CallerFilePath] string path = "") => Path.GetDirectoryName(path)!;
+
+// Best-effort cleanup: remove docker volumes whose name starts with `prefix` except
+// `keep` — i.e. stale node_modules volumes from previous package-lock hashes. Old-hash
+// volumes aren't used by any running container, so removal is safe; any failure (docker
+// not ready, or a volume still in use) is ignored so it never blocks startup.
+static void PruneStaleVolumes(string prefix, string keep)
+{
+    try
+    {
+        using var list = Process.Start(new ProcessStartInfo("docker", $"volume ls -q --filter name={prefix}")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        });
+        if (list is null) return;
+        var names = list.StandardOutput.ReadToEnd();
+        list.WaitForExit();
+        foreach (var name in names.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (name == keep || !name.StartsWith(prefix)) continue;
+            try
+            {
+                using var rm = Process.Start(new ProcessStartInfo("docker", $"volume rm {name}")
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                });
+                rm?.WaitForExit();
+                if (rm?.ExitCode == 0) Console.WriteLine($"[altered] pruned stale node_modules volume {name}");
+            }
+            catch { /* in use or already gone — ignore */ }
+        }
+    }
+    catch { /* docker unavailable — ignore */ }
+}
 
 // A presentational-only initial snapshot that keeps a resource OUT of the dashboard
 // (graph + table) without changing its behaviour — used for the dev DB passwords and
