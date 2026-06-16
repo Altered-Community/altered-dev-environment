@@ -29,7 +29,7 @@ is also printed in the console).
 | `altered-decks-api` | http://decks.altered.local.gd:8001 (or http://localhost:8001) | local | Symfony/FrankenPHP + Postgres; admin at `/admin/login` |
 | `altered-collection-api` | http://collection.altered.local.gd:8002 (or http://localhost:8002) | local | Symfony/API Platform/FrankenPHP + Postgres; docs at `/api/docs` |
 | `altered-website`   | http://website.altered.local.gd:18181 (or http://localhost:18181) | local | Plain PHP/Apache + MariaDB; Keycloak SSO via the `main-site` client |
-| `altered-uniques-api` | http://uniques.altered.local.gd:8003 (or http://localhost:8003) | local | Rust in-memory search over **Unique** cards (`/api/v2/*`); no DB/auth. Standalone — NOT the prod cards API |
+| `altered-uniques-api` | http://uniques.altered.local.gd:8005 (or http://localhost:8005) | local | Rust in-memory search over **Unique** cards (`/api/v2/*`); no DB/auth. Standalone — NOT the prod cards API |
 | `altered-uniques-ui` | http://localhost:8004             | local | Vite/React demo SPA for the uniques API (Vite dev server, HMR; browser → API direct) |
 | `altered-dbgate`    | http://localhost:18182            | local | One web DB client for **all** project DBs (decks + collection Postgres, website MariaDB) |
 | cards               | https://cards.alteredcore.org     | **prod** | decks (and the website) read cards from prod |
@@ -180,7 +180,7 @@ so a dependency change auto-uses a fresh (re-seeded) volume and the AppHost prun
 stale ones. `npm run dev` serves it.
 
 The SPA calls the API **straight from the browser** (the API sets `CorsLayer::permissive`),
-so `VITE_API_BASE_URL` points at the browser-reachable API (`http://localhost:8003`) — no
+so `VITE_API_BASE_URL` points at the browser-reachable API (`http://localhost:8005`) — no
 Vite proxy, no CORS work. Vite's port is published directly (`-p`, like Keycloak) on the
 same internal/external port (8004) so the HMR websocket lines up. **Open it at
 http://localhost:8004** — Vite's host allowlist permits `localhost` but not the

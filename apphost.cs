@@ -575,15 +575,16 @@ if (Enabled("uniques"))
         // restarts. Same idea as decks/collection's vendor/ volume.
         .WithVolume("altered-uniques-api-target", "/app/target")
         .WithVolume("altered-uniques-index", "/app/build")
-        .WithHttpEndpoint(port: 8003, targetPort: 8080, name: "http")
+        // Host port 8005: 8003 is taken by the ownership service (PR #3), 8004 by uniques-ui.
+        .WithHttpEndpoint(port: 8005, targetPort: 8080, name: "http")
         // PORT is honoured by config.rs (no custom toml needed). The index path is left
         // to the app's default.toml (./build/full_index.tar.zst -> /app/build/...), which
         // the entrypoint downloads into — setting INDEX_PATH too would just duplicate it
         // and log a "prefer index.path in config" warning on every start.
         .WithEnvironment("PORT", "8080")
         // Dashboard link: a friendly *.local.gd host (resolves to 127.0.0.1 -> the
-        // Aspire proxy on :8003) hitting a tiny sample query.
-        .WithUrl("http://uniques.altered.local.gd:8003/api/v2/cards?limit=1", "cards (sample)");
+        // Aspire proxy on :8005) hitting a tiny sample query.
+        .WithUrl("http://uniques.altered.local.gd:8005/api/v2/cards?limit=1", "cards (sample)");
 
     uniquesApiResource = uniquesApi.Resource;
 }
@@ -627,7 +628,7 @@ if (Enabled("uniques-ui"))
         .WithContainerRuntimeArgs("-p", "0.0.0.0:8004:8004")
         // Must be reachable FROM THE BROWSER (not the Aspire alias). Vite reads VITE_-
         // prefixed vars from the environment (see demo-ui/README).
-        .WithEnvironment("VITE_API_BASE_URL", "http://localhost:8003")
+        .WithEnvironment("VITE_API_BASE_URL", "http://localhost:8005")
         .WithUrl("http://localhost:8004/", "demo-ui");
 
     // Express the runtime (browser-side) dependency on the API as a graph edge ONLY —
