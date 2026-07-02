@@ -7,3 +7,6 @@ obj/
 
 # Aspire / tooling
 *.user
+
+# JetBrains IDE
+.idea/

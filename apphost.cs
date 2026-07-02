@@ -47,6 +47,7 @@ var repoUrls = new Dictionary<string, string>
     ["AlteredOwnership"] = "https://github.com/Altered-Re-Union/AlteredOwnership.git",
     ["alteredcore-website"] = "https://github.com/Altered-Community/alteredcore-website.git",
     ["altered-deckbuilder-poc-v2"] = "https://github.com/Altered-Community/altered-deckbuilder-poc-v2.git",
+    ["uniques-search-api"] = "https://github.com/Altered-Re-Union/uniques-search-api.git",
 };
 
 // Handles to cross-referenced resources, assigned as each service is mounted, so
@@ -54,6 +55,16 @@ var repoUrls = new Dictionary<string, string>
 IResourceBuilder<ContainerResource>? authApp = null;
 IResourceBuilder<ContainerResource>? decksApp = null;
 IResourceBuilder<ContainerResource>? collectionApp = null;
+
+// The DB server resources, captured so DbGate can declare a relationship to each
+// (graph edges) — only the enabled ones are non-null.
+IResource? decksPgResource = null;
+IResource? collectionPgResource = null;
+IResource? websiteDbResource = null;
+
+// The uniques API resource, captured so the demo-ui can declare a graph relationship to
+// it (browser-side runtime dependency — edge only, no startup gating).
+IResource? uniquesApiResource = null;
 
 // ===========================================================================
 // auth — Keycloak (local), built from AlteredAuth/build/Dockerfile so it carries
@@ -526,6 +537,106 @@ if (Enabled("website"))
 }
 
 // ===========================================================================
+// uniques — uniques-search-api (local; the Altered-Re-Union fork of Taum/rust-cards-api).
+// A Rust/Axum in-memory search engine over the Altered "Unique" cards. NOTE: this is
+// NOT the prod cards API — it has its own
+// contract (/api/v2/cards, /api/v2/card/{ref}, /api/v2/effects) and only covers
+// Unique characters, so it does NOT replace ALTERED_CORE_URL/CARDS_API_URL. It's
+// the simplest service here: no DB, no Keycloak, no seed, nothing in DbGate.
+//
+// The repo's root Dockerfile is PROD-only (a multi-stage Cloud Run build that bakes
+// the binary), so the repo ships a separate DEV image at docker/dev/Dockerfile that we
+// build and bind-mount the source into like decks/collection. Config is driven by
+// env + the app's own default.toml (config.rs honours a PORT override; per-env tomls
+// are optional, and default.toml already ships the right index path), so no custom
+// toml is needed. The
+// ~270 MB prebuilt index is downloaded once into a volume by the entrypoint (the
+// binary loads it from disk and won't fetch it itself). The server binds
+// 0.0.0.0:$PORT, so it's reachable on the Aspire network by its resource name —
+// future consumers (website, decks-api) can point at http://altered-uniques-api:8080
+// with no change here. CORS is already CorsLayer::permissive in the app's http.rs, so
+// even browser-direct callers (the demo-ui) work out of the box.
+// ===========================================================================
+if (Enabled("uniques"))
+{
+    var uniquesRepo = Repo("uniques-search-api");
+
+    var uniquesApi = builder.AddDockerfile("altered-uniques-api", Path.Combine(uniquesRepo, "docker", "dev"))
+        .WithBindMount(uniquesRepo, "/app")
+        // Dev formats wiring: a dev-env-owned local.toml bind-mounted over the checkout's
+        // config/local.toml — enables [formats] (source = /app/formats = the repo's
+        // committed formats/ dir) with hot-reload polling. Env alone can't set the reload
+        // interval, only the toml can.
+        .WithBindMount(Path.Combine(appHostDir, "uniques", "local.toml"),
+            "/app/uniques-http-api/config/local.toml", isReadOnly: true)
+        // target/ (cargo build cache) and build/ (the downloaded index) in
+        // container-managed volumes — they shadow the host checkout's subpaths, so
+        // the first build is slow then cached, and the index persists across
+        // restarts. Same idea as decks/collection's vendor/ volume.
+        .WithVolume("altered-uniques-api-target", "/app/target")
+        .WithVolume("altered-uniques-index", "/app/build")
+        // Host port 8005: 8003 is taken by the ownership service (PR #3), 8004 by uniques-ui.
+        .WithHttpEndpoint(port: 8005, targetPort: 8080, name: "http")
+        // PORT is honoured by config.rs (no custom toml needed). The index path is left
+        // to the app's default.toml (./build/full_index.tar.zst -> /app/build/...), which
+        // the entrypoint downloads into — setting INDEX_PATH too would just duplicate it
+        // and log a "prefer index.path in config" warning on every start.
+        .WithEnvironment("PORT", "8080")
+        // Dashboard link: a friendly *.local.gd host (resolves to 127.0.0.1 -> the
+        // Aspire proxy on :8005) hitting a tiny sample query.
+        .WithUrl("http://uniques.altered.local.gd:8005/api/v2/cards?limit=1", "cards (sample)");
+
+    uniquesApiResource = uniquesApi.Resource;
+}
+
+// ===========================================================================
+// uniques-ui — uniques-search-api/demo-ui (local). A Vite 6 + React 19 SPA demo for
+// the uniques API, run via the Vite dev server (HMR). Browser-only: it calls the API
+// directly (the API sets CorsLayer::permissive), so VITE_API_BASE_URL points at the
+// browser-reachable API URL — no proxy, no CORS work. The repo ships the dev image at
+// demo-ui/docker/dev/ (npm ci is baked at build time). demo-ui/ is bind-mounted for
+// HMR; the node_modules volume is seeded from the image (the bind-mount would otherwise
+// shadow the baked node_modules) — no runtime install.
+//
+// We publish Vite's port directly with -p (like Keycloak), NOT through the Aspire
+// proxy, and run Vite on the same port we publish (8004) so the HMR websocket — which
+// the browser opens to the page's own host:port — lines up. Open it at
+// http://localhost:8004 (Vite's host allowlist permits localhost; the *.local.gd host
+// would need server.allowedHosts). No WaitFor: the SPA needs no backend to start
+// serving, and not blocking on the API's long first build keeps the UI available fast.
+// ===========================================================================
+if (Enabled("uniques-ui"))
+{
+    var uniquesUiRepo = Repo("uniques-search-api");
+
+    // node_modules is baked into the image; this volume only un-shadows it under the
+    // source bind-mount, seeded from the image. Key the volume name to a hash of
+    // package-lock.json so a dependency change automatically gets a FRESH (re-seeded)
+    // volume — no manual wipe. Stale volumes from older hashes are pruned (best-effort).
+    var nmLock = Path.Combine(uniquesUiRepo, "demo-ui", "package-lock.json");
+    var nmTag = File.Exists(nmLock)
+        ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nmLock)))[..8].ToLowerInvariant()
+        : "default";
+    var nmVolume = $"altered-uniques-ui-node-modules-{nmTag}";
+    PruneStaleVolumes("altered-uniques-ui-node-modules-", keep: nmVolume);
+
+    var uniquesUi = builder.AddDockerfile("altered-uniques-ui", Path.Combine(uniquesUiRepo, "demo-ui"), "docker/dev/Dockerfile")
+        .WithBindMount(Path.Combine(uniquesUiRepo, "demo-ui"), "/app")
+        .WithVolume(nmVolume, "/app/node_modules")
+        // Publish Vite on 0.0.0.0:8004 directly (bypass the Aspire proxy) so the HMR
+        // websocket works; internal port == published port so the HMR client lines up.
+        .WithContainerRuntimeArgs("-p", "0.0.0.0:8004:8004")
+        // Must be reachable FROM THE BROWSER (not the Aspire alias). Vite reads VITE_-
+        // prefixed vars from the environment (see demo-ui/README).
+        .WithEnvironment("VITE_API_BASE_URL", "http://localhost:8005")
+        .WithUrl("http://localhost:8004/", "demo-ui");
+
+    // Express the runtime (browser-side) dependency on the API as a graph edge ONLY —
+    // no startup gating (same mechanism DbGate uses for the DBs). Null if uniques is off.
+    if (uniquesApiResource is not null) uniquesUi.WithReferenceRelationship(uniquesApiResource);
+}
+
+// ===========================================================================
 // dbgate — one web DB client for ALL project databases (replaces the per-service
 // phpMyAdmin). It reaches each DB container over the Aspire network by its
 // resource-name alias (internal ports), so no host ports need publishing on the
@@ -604,6 +715,43 @@ builder.Build().Run();
 
 // Absolute directory containing this apphost.cs file (compile-time path).
 static string AppHostDirectory([CallerFilePath] string path = "") => Path.GetDirectoryName(path)!;
+
+// Best-effort cleanup: remove docker volumes whose name starts with `prefix` except
+// `keep` — i.e. stale node_modules volumes from previous package-lock hashes. Old-hash
+// volumes aren't used by any running container, so removal is safe; any failure (docker
+// not ready, or a volume still in use) is ignored so it never blocks startup.
+static void PruneStaleVolumes(string prefix, string keep)
+{
+    try
+    {
+        using var list = Process.Start(new ProcessStartInfo("docker", $"volume ls -q --filter name={prefix}")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        });
+        if (list is null) return;
+        var names = list.StandardOutput.ReadToEnd();
+        list.WaitForExit();
+        foreach (var name in names.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (name == keep || !name.StartsWith(prefix)) continue;
+            try
+            {
+                using var rm = Process.Start(new ProcessStartInfo("docker", $"volume rm {name}")
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                });
+                rm?.WaitForExit();
+                if (rm?.ExitCode == 0) Console.WriteLine($"[altered] pruned stale node_modules volume {name}");
+            }
+            catch { /* in use or already gone — ignore */ }
+        }
+    }
+    catch { /* docker unavailable — ignore */ }
+}
 
 // A presentational-only initial snapshot that keeps a resource OUT of the dashboard
 // (graph + table) without changing its behaviour — used for the dev DB passwords and

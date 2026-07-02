@@ -1,0 +1,17 @@
+# Dev formats config for the uniques service, owned by altered-dev-environment and
+# bind-mounted (read-only) over the checkout's config/local.toml. It enables the
+# `[formats]` filters from the repo's committed formats/ dir, with hot-reload polling.
+#
+# Why a file (not just env): the FORMATS_PATH env var enables formats but can't set the
+# reload interval — only the [formats] toml can. The server loads default.toml then this
+# local.toml from CONFIG_DIR (/app/uniques-http-api/config); PORT still comes from env.
+#
+# Hot-reload note: the poller compares the manifest's per-id `version` numbers, so to
+# pick up an edit you must bump `version` in BOTH the format file and its manifest row.
+
+[formats]
+reload_interval_secs = 5
+
+[formats.source]
+type = "disk"
+path = "/app/formats"   # = uniques-search-api/formats/ (repo bind-mounted at /app)
