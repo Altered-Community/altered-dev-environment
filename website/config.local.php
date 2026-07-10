@@ -80,6 +80,12 @@ define('OWNERSHIP_API_URL', 'http://altered-ownership:8080');
 define('OWNERSHIP_WEB_URL', 'http://ownership.altered.local.gd:8003');
 define('COLLECTION_API_URL', 'http://altered-collection-api:80');
 define('COLLECTION_USE_API', true);
+// Browser-facing uniques search API (uniques-search-api, host port 8005). The Uniques
+// tab's card-search widget calls this straight from the browser (CORS is permissive),
+// same pattern as OWNERSHIP_WEB_URL above. Requires the "uniques" service enabled.
+// Without this define, card-search.js hides the All Uniques/Frontier format toggle
+// and falls back to the old CARDS_API_URL search path.
+define('UNIQUES_API_URL', 'https://search.altered.re');
 
 // ─── Deployment ───────────────────────────────────────────────────────────────
 define('BASE_URL', '');
