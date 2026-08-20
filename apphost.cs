@@ -359,6 +359,10 @@ if (Enabled("ownership"))
         .WithEnvironment("ExternalHosts__AuthBase", AuthUrl)
         .WithEnvironment("ExternalHosts__ReunionWebBase", "http://website.altered.local.gd:18181")
         .WithEnvironment("ExternalHosts__CardsApiBase", CardsProdUrl)
+        // Bootstraps alice as an ownership admin on first migrate (SeedInitialAdmins),
+        // same fixed Keycloak id the decks/website admin seeds use — mirrors them
+        // being the conventional local admin account across every service here.
+        .WithEnvironment("InitialAdmins__KeycloakIds", "11111111-1111-1111-1111-111111111111")
         .WaitFor(ownershipDb)
         .WaitFor(ownershipRedis)
         .WithHttpHealthCheck("/health")
@@ -587,6 +591,14 @@ if (Enabled("uniques"))
         .WithUrl("http://uniques.altered.local.gd:8005/api/v2/cards?limit=1", "cards (sample)");
 
     uniquesApiResource = uniquesApi.Resource;
+
+    // Wire decks-api to the local uniques API for the "frontier" deck format
+    // (FrontierFormatValidator calls GET /api/v2/cards?ref=...&format=frontier to
+    // check Unique cards against the Frontier allowlist). Server-to-server call
+    // over the Aspire network, so it uses the resource name + container-internal
+    // targetPort (8080), not the published host port (8005) used by browsers/UI.
+    // Edge only (no WaitFor): decks-api only calls this on deck validation, not at boot.
+    decksApp?.WithEnvironment("UNIQUES_SEARCH_API_URL", "http://altered-uniques-api:8080");
 }
 
 // ===========================================================================

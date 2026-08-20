@@ -69,6 +69,9 @@ define('GITHUB_REPO', 'owner/community-feedback');
 // DB starts empty, so collection pages show no data until some is added.
 // cards/cdn stay on prod (cards reads the same prod API decks-api itself uses).
 define('CARDS_API_URL',     'https://cards.alteredcore.org');
+// Uniques search API (rust-cards-api / uniques-search-api). Browser-direct fetch,
+// like CARDS_API_URL (not server-proxied) — the Aspire endpoint published at :8005.
+define('UNIQUES_API_URL',   'http://localhost:8005');
 define('DECKS_API_URL',     'http://altered-decks-api:80');
 define('CDN_URL',           'https://cdn.alteredcore.org');
 // Server-side proxy target: reach the ownership container by its Aspire network
