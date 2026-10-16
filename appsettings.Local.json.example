@@ -4,6 +4,9 @@
   "//ReposDirectory": "Absolute path where the Altered repos live / will be cloned. Defaults to the parent folder of this repo (siblings).",
   "ReposDirectory": "C:\\Users\\Reverb\\Documents\\repos",
 
+  "//AlteredDraftUrl": "Where decks-api reaches altered-draft (sealed-deck pool validation). Defaults to http://host.docker.internal:8080, i.e. altered-draft's `make dev` on the host.",
+  "AlteredDraftUrl": "http://host.docker.internal:8080",
+
   "//Services": "Toggle which services the AppHost mounts. Same shape as appsettings.json.",
   "Services": {
     "auth": { "Enabled": true },
