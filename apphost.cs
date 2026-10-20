@@ -188,6 +188,10 @@ if (Enabled("decks"))
         .WithEnvironment("MERCURE_SUBSCRIBER_JWT_KEY", "!ChangeThisMercureHubJWTSecretKey!")
         .WithEnvironment("MERCURE_PUBLISHER_JWT_ALG", "HS256")
         .WithEnvironment("MERCURE_SUBSCRIBER_JWT_ALG", "HS256")
+        // Recent frankenphp images ship a Mercure that rejects the Caddyfile's legacy
+        // publisher_jwt/subscriber_jwt directives unless compatibility mode is opted into
+        // (otherwise Caddy exits on boot).
+        .WithEnvironment("MERCURE_EXTRA_DIRECTIVES", "protocol_version_compatibility 8")
         .WithReference(decksDb)
         .WaitFor(decksDb)
         // Dashboard links: a friendly *.local.gd host (resolves to 127.0.0.1 ->
@@ -302,6 +306,10 @@ if (Enabled("collection"))
         .WithEnvironment("MERCURE_SUBSCRIBER_JWT_KEY", "!ChangeThisMercureHubJWTSecretKey!")
         .WithEnvironment("MERCURE_PUBLISHER_JWT_ALG", "HS256")
         .WithEnvironment("MERCURE_SUBSCRIBER_JWT_ALG", "HS256")
+        // Recent frankenphp images ship a Mercure that rejects the Caddyfile's legacy
+        // publisher_jwt/subscriber_jwt directives unless compatibility mode is opted into
+        // (otherwise Caddy exits on boot).
+        .WithEnvironment("MERCURE_EXTRA_DIRECTIVES", "protocol_version_compatibility 8")
         .WithReference(collectionDb)
         .WaitFor(collectionDb);
 
