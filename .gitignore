@@ -10,3 +10,8 @@ obj/
 
 # JetBrains IDE
 .idea/
+
+# Confidential data (never commit)
+*confidential*
+altered-private/
+private-formats/

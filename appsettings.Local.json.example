@@ -4,6 +4,11 @@
   "//ReposDirectory": "Absolute path where the Altered repos live / will be cloned. Defaults to the parent folder of this repo (siblings).",
   "ReposDirectory": "C:\\Users\\Reverb\\Documents\\repos",
 
+  "//Uniques": "Optional: dir with manifest.json + format files, mounted over the uniques API's formats/ (keeps confidential format lists out of git).",
+  "Uniques": {
+    "FormatsDirectory": "C:\\Users\\Reverb\\altered-private\\formats"
+  },
+
   "//Services": "Toggle which services the AppHost mounts. Same shape as appsettings.json.",
   "Services": {
     "auth": { "Enabled": true },
