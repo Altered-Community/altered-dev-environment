@@ -88,6 +88,14 @@ website checkout's own copy. That one file is where the wiring lives:
   action: an `is_active=1` row in `dev_plugins`, plus running `reunion-events`'
   `install.sql` (its `{table}` → `dev_plugin_re_*`) once. Idempotent, so it survives a
   DB wipe — no more activating them by hand in `/admin`.
+- **content** — the container gets `AC_STACK_SEED=1` and `AC_STACK_MIRROR=1`, so the repo's
+  own entrypoint loads the production **main menu** (`docker/stack/seed.php`) and copies the
+  public content of altered.re — news articles, content pages, side menu, footer, and their
+  images into the git-ignored `uploads/` (`docker/stack/mirror-prod.php`). Each runs once
+  per version (tracked in the settings table), so a fresh DB volume re-triggers them. To
+  refresh the copy: `docker exec <altered-website container> php docker/stack/mirror-prod.php --force`
+  (add `--source=https://website-preprod.altered.re` for preprod). Users, plugin data and
+  anything behind a login are not copied.
 
 Browse the website's MariaDB (and every other project DB) with **DbGate** — see
 below.
@@ -156,6 +164,13 @@ CORE/COREKS sets + 10 random cards per faction). The dev-env enables them via a
 bind-mounted [`uniques/local.toml`](uniques/local.toml) (`[formats]` source `/app/formats`)
 with **hot-reload** polling (5 s). Query `?format=frontier` / `?format=living-legend`; an
 unknown id → `400 unknown format`, a format that fails to load → `500` (check the logs).
+
+**Private formats.** To use confidential format lists without committing them, set
+`Uniques:FormatsDirectory` in the non-committed `appsettings.Local.json` to a directory
+outside any repo containing `manifest.json` + the format files. The AppHost bind-mounts it
+read-only over `/app/formats` in the container (the checkout's `formats/` is untouched).
+It replaces the repo's formats entirely, so include every format you want (e.g.
+`living-legend`). Unset = the repo's committed formats.
 
 **Hot-reload note:** the poller compares the manifest's per-id `version`, so to pick up an
 edit you must bump `version` in BOTH the format file and its `manifest.json` row.
