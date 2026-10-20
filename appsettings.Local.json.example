@@ -6,6 +6,10 @@
 
   "//AlteredDraftUrl": "Where decks-api reaches altered-draft (sealed-deck pool validation). Defaults to http://host.docker.internal:8080, i.e. altered-draft's `make dev` on the host.",
   "AlteredDraftUrl": "http://host.docker.internal:8080",
+  "//Uniques": "Optional: dir with manifest.json + format files, mounted over the uniques API's formats/ (keeps confidential format lists out of git).",
+  "Uniques": {
+    "FormatsDirectory": "C:\\Users\\Reverb\\altered-private\\formats"
+  },
 
   "//Services": "Toggle which services the AppHost mounts. Same shape as appsettings.json.",
   "Services": {

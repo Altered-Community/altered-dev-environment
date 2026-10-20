@@ -448,6 +448,15 @@ if (Enabled("website"))
             Path.Combine(appHostDir, "website", "config.local.php"),
             "/var/www/html/config.local.php",
             isReadOnly: true)
+        // Content parity with production, handled by the repo's own entrypoint (once
+        // per version, tracked in the settings table): AC_STACK_SEED loads the prod
+        // main menu + site name/logo (docker/stack/seed.php; its community-decks seed
+        // is best-effort — it needs Keycloak + decks-api, which we don't gate on, and
+        // retries on the next restart). AC_STACK_MIRROR copies the public content of
+        // altered.re (news + images into uploads/, pages, side menu, footer) via
+        // docker/stack/mirror-prod.php. Re-run it with --force inside the container.
+        .WithEnvironment("AC_STACK_SEED", "1")
+        .WithEnvironment("AC_STACK_MIRROR", "1")
         .WithHttpEndpoint(port: 18181, targetPort: 80, name: "http")
         .WithUrlForEndpoint("http", url =>
         {
@@ -609,6 +618,24 @@ if (Enabled("uniques"))
         // Dashboard link: a friendly *.local.gd host (resolves to 127.0.0.1 -> the
         // Aspire proxy on :8005) hitting a tiny sample query.
         .WithUrl("http://uniques.altered.local.gd:8005/api/v2/cards?limit=1", "cards (sample)");
+
+    // Optional private formats: if Uniques:FormatsDirectory (appsettings.Local.json, not
+    // committed) points at a dir holding manifest.json + format files, bind-mount it
+    // read-only over /app/formats inside the container. The host checkout is untouched,
+    // so confidential format lists (e.g. the real frontier allowlist) never enter a repo.
+    var privateFormatsDir = builder.Configuration["Uniques:FormatsDirectory"];
+    if (!string.IsNullOrWhiteSpace(privateFormatsDir))
+    {
+        if (File.Exists(Path.Combine(privateFormatsDir, "manifest.json")))
+        {
+            uniquesApi.WithBindMount(privateFormatsDir, "/app/formats", isReadOnly: true);
+            Console.WriteLine($"[altered] uniques: using private formats from {privateFormatsDir}");
+        }
+        else
+        {
+            Console.WriteLine($"[altered] uniques: Uniques:FormatsDirectory '{privateFormatsDir}' has no manifest.json; using the repo's formats/.");
+        }
+    }
 
     uniquesApiResource = uniquesApi.Resource;
 
