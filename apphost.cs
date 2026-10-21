@@ -388,7 +388,7 @@ if (Enabled("ownership"))
 }
 
 // ===========================================================================
-// website — alteredcore-website (local). Plain PHP 7.4 + Apache, MariaDB, no
+// website — alteredcore-website (local). Plain PHP 8.4 + Apache, MariaDB, no
 // build step. Wired to local Keycloak (the "main-site" client) and the local
 // decks-api; cards/cdn/collection stay on prod (not local yet). The site reads
 // plain define() constants from config.local.php (no env support), so the
@@ -421,7 +421,7 @@ if (Enabled("website"))
             isReadOnly: true)
         .WithDataVolume("altered-website-db-data");
 
-    // website container — built from the repo Dockerfile (php:7.4-apache), source
+    // website container — built from the repo Dockerfile (php:8.4.27-apache), source
     // bind-mounted like the compose. config.local.php is bind-mounted from the
     // AppHost-managed dev config (overrides the user's checkout copy), which wires
     // DB + local Keycloak + local decks-api. Needs the same Keycloak host-gateway
