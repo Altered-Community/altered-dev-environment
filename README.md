@@ -54,6 +54,20 @@ the id is fixed, that row *is* the same user alice logs in as via Keycloak — s
 decks `/admin` UI (http://localhost:8001/admin/login) accepts her. Add more admins
 by adding rows to the seed SQL in `apphost.cs` (e.g. bob = `2222…`).
 
+### decks ↔ altered-draft (sealed pools)
+
+decks-api validates **sealed** decks against the player's pool, which it fetches from
+[altered-draft](https://github.com/Altered-Re-Union/altered-draft) (`GET /api/tournament-pool-by-deck`,
+forwarding the caller's token). altered-draft is not an Aspire resource: run it on the host
+with its own `make dev` (API on `:8080`). The AppHost points decks-api's `ALTERED_DRAFT_URL`
+at `http://host.docker.internal:8080` by default; override it with `AlteredDraftUrl` in
+`appsettings.Local.json`.
+
+If altered-draft isn't running, nothing breaks: decks-api just can't verify the pool, so
+sealed decks report *"Could not verify your sealed pool"* and stay invalid — every other
+format is unaffected. (Without this setting decks-api would call the **prod** altered-draft
+with a local-realm token, which is always rejected — same result.)
+
 ### website
 
 `altered-website` is plain PHP 7.4 + Apache with its own MariaDB — no framework, no

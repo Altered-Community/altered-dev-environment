@@ -142,6 +142,13 @@ if (Enabled("auth"))
 // slash ("//api/cards/batch") that the prod cards server 404s.
 const string CardsProdUrl = "https://cards.alteredcore.org";
 
+// altered-draft, which decks-api calls back to validate sealed decks against the
+// player's pool (SealedFormatValidator -> GET /api/tournament-pool-by-deck). It is not
+// an Aspire resource: it runs on the host via its own `make dev` (API on :8080), reached
+// from the container through the host gateway. Override via appsettings.Local.json
+// ("AlteredDraftUrl"), e.g. to target another port. No trailing slash.
+var alteredDraftUrl = builder.Configuration["AlteredDraftUrl"] ?? "http://host.docker.internal:8080";
+
 if (Enabled("decks"))
 {
     var decksRepo = Repo("altered-core-decks-api");
@@ -183,6 +190,11 @@ if (Enabled("decks"))
         .WithEnvironment("KEYCLOAK_CLIENT_SECRET", "dev-toxicity-deckbuilder-secret")
         .WithEnvironment("DEV_AUTH_ENABLED", "true")
         .WithEnvironment("ALTERED_CORE_URL", CardsProdUrl)
+        // Sealed-deck validation calls back to altered-draft (see alteredDraftUrl above).
+        // host.docker.internal already resolves on Docker Desktop; the explicit mapping
+        // makes it work on Linux engines too.
+        .WithContainerRuntimeArgs("--add-host", "host.docker.internal:host-gateway")
+        .WithEnvironment("ALTERED_DRAFT_URL", alteredDraftUrl)
         // Mercure (Caddy module) needs its JWT keys present to boot.
         .WithEnvironment("MERCURE_PUBLISHER_JWT_KEY", "!ChangeThisMercureHubJWTSecretKey!")
         .WithEnvironment("MERCURE_SUBSCRIBER_JWT_KEY", "!ChangeThisMercureHubJWTSecretKey!")
