@@ -56,8 +56,9 @@ by adding rows to the seed SQL in `apphost.cs` (e.g. bob = `2222…`).
 
 ### website
 
-`altered-website` is plain PHP 7.4 + Apache with its own MariaDB — no framework, no
-build step. The site reads plain `define()` constants from `config.local.php` (it
+`altered-website` is plain PHP 8.4 + Apache with its own MariaDB — no framework, no
+build step. Its image is built from the `Dockerfile` of your website checkout, so the
+PHP version follows the branch checked out there (8.4.27 since the PHP 8.4 migration). The site reads plain `define()` constants from `config.local.php` (it
 has no env-var support), so the dev-environment **owns** that file: a dev copy lives
 at [website/config.local.php](website/config.local.php) and is bind-mounted over the
 website checkout's own copy. That one file is where the wiring lives:
