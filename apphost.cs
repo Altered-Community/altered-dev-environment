@@ -7,7 +7,6 @@
 
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Configuration;
 using MySqlConnector;
 using Npgsql;
@@ -457,6 +456,10 @@ if (Enabled("website"))
         // docker/stack/mirror-prod.php. Re-run it with --force inside the container.
         .WithEnvironment("AC_STACK_SEED", "1")
         .WithEnvironment("AC_STACK_MIRROR", "1")
+        // Auto-activate default plugins via docker/entrypoint.sh -> bin/plugins.php activate
+        // (idempotent: installs sql/install.sql when sql_installed_at IS NULL, records the
+        // manifest version from plugin.json, and repairs existing volumes missing SQL init).
+        .WithEnvironment("AC_ACTIVATE_PLUGINS", "core-altered-cards reunion-events")
         .WithHttpEndpoint(port: 18181, targetPort: 80, name: "http")
         .WithUrlForEndpoint("http", url =>
         {
@@ -489,24 +492,6 @@ if (Enabled("website"))
         "VALUES ('11111111-1111-1111-1111-111111111111', 1, 1) " +
         "ON DUPLICATE KEY UPDATE is_admin = 1, group_id = 1;";
 
-    // Plugins to auto-activate at init, reproducing the admin "Activate" action
-    // (admin/plugins.php): a row in {plugins} with is_active=1, plus the plugin's
-    // install.sql run once for plugins that ship one. Done here (in-process,
-    // idempotent) so a fresh/clean DB comes up with these enabled instead of
-    // needing manual activation in /admin. core-altered-cards ships no SQL;
-    // reunion-events ships sql/install.sql whose {table} placeholders resolve to
-    // `dev_plugin_re_<table>` via the website's qp() helper (DB_PREFIX=dev_,
-    // table_prefix=re) — reproduced below with a regex over the real file.
-    const string cardsActivateSql =
-        "INSERT INTO dev_plugins (id, is_active, version, activated_at) " +
-        "VALUES ('core-altered-cards', 1, '1.0.0', NOW()) " +
-        "ON DUPLICATE KEY UPDATE is_active = 1;";
-    const string reunionActivateSql =
-        "INSERT INTO dev_plugins (id, is_active, version, sql_installed_at, activated_at) " +
-        "VALUES ('reunion-events', 1, '1.0.0', NOW(), NOW()) " +
-        "ON DUPLICATE KEY UPDATE is_active = 1, sql_installed_at = COALESCE(sql_installed_at, NOW());";
-    var reunionInstallSqlPath = Path.Combine(websiteRepo, "plugins", "reunion-events", "sql", "install.sql");
-
     websiteDb.OnResourceReady(async (_, _, ct) =>
     {
         // Resolved from the AppHost process, this points at the MariaDB container's
@@ -515,28 +500,6 @@ if (Enabled("website"))
         var connectionString = await websiteDb.Resource.ConnectionStringExpression.GetValueAsync(ct)
             + ";Database=alteredcore";
 
-        // Build the statement list: admin + Altered Cards, then Reunion Events
-        // (its install.sql first so the settings table exists before we mark it
-        // installed). All statements are idempotent (UPSERT / CREATE IF NOT EXISTS).
-        var statements = new List<string> { websiteAdminSeedSql, cardsActivateSql };
-        if (File.Exists(reunionInstallSqlPath))
-        {
-            var reunionInstallSql = Regex.Replace(
-                File.ReadAllText(reunionInstallSqlPath),
-                @"\{([a-z_]+)\}",
-                m => $"`dev_plugin_re_{m.Groups[1].Value}`");
-            statements.Add(reunionInstallSql);
-            statements.Add(reunionActivateSql);
-        }
-        else
-        {
-            // No install.sql found: still activate, but don't claim SQL was installed.
-            statements.Add(
-                "INSERT INTO dev_plugins (id, is_active, version, activated_at) " +
-                "VALUES ('reunion-events', 1, '1.0.0', NOW()) ON DUPLICATE KEY UPDATE is_active = 1;");
-            Console.WriteLine($"[altered] reunion-events install.sql not found at {reunionInstallSqlPath}; activated without it.");
-        }
-
         const int maxAttempts = 10;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
@@ -544,25 +507,19 @@ if (Enabled("website"))
             {
                 await using var conn = new MySqlConnection(connectionString);
                 await conn.OpenAsync(ct);
-                // NOTE: schema migrations are applied by the website CONTAINER's
-                // entrypoint (docker/entrypoint.sh -> bin/migrate.php), not here. This
-                // seed only inserts rows into base-schema tables.
-                foreach (var sql in statements)
-                {
-                    await using var cmd = new MySqlCommand(sql, conn);
-                    await cmd.ExecuteNonQueryAsync(ct);
-                }
-                Console.WriteLine("[altered] website seed applied (alice admin + plugins: core-altered-cards, reunion-events).");
+                await using var cmd = new MySqlCommand(websiteAdminSeedSql, conn);
+                await cmd.ExecuteNonQueryAsync(ct);
+                Console.WriteLine("[altered] website admin seed applied.");
                 return;
             }
             catch (Exception ex)
             {
                 if (attempt == maxAttempts)
                 {
-                    Console.WriteLine($"[altered] website seed FAILED after {maxAttempts} attempts ({ex.Message}).");
+                    Console.WriteLine($"[altered] website admin seed FAILED after {maxAttempts} attempts ({ex.Message}).");
                     return;
                 }
-                Console.WriteLine($"[altered] website seed attempt {attempt}/{maxAttempts} failed ({ex.Message}); retrying in 3s...");
+                Console.WriteLine($"[altered] website admin seed attempt {attempt}/{maxAttempts} failed ({ex.Message}); retrying in 3s...");
                 await Task.Delay(TimeSpan.FromSeconds(3), ct);
             }
         }
