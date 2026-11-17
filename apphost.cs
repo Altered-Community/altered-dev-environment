@@ -456,6 +456,13 @@ if (Enabled("website"))
         // docker/stack/mirror-prod.php. Re-run it with --force inside the container.
         .WithEnvironment("AC_STACK_SEED", "1")
         .WithEnvironment("AC_STACK_MIRROR", "1")
+        // Re:Builder (Angular SPA plugin): activated by the repo's entrypoint via
+        // bin/plugins.php (idempotent, at every start). Once active, the account
+        // menu shows the « Beta Deckbuilder » toggle, which hands the decks/cards
+        // pages over to Re:Builder. Its bundle (plugins/rebuilder/dist) is not
+        // committed: build it in the checkout (cd plugins/rebuilder/app && npm ci
+        // && npm run build) — the source is bind-mounted, so no image rebuild.
+        .WithEnvironment("AC_ACTIVATE_PLUGINS", "rebuilder")
         // Auto-activate default plugins via docker/entrypoint.sh -> bin/plugins.php activate
         // (idempotent: installs sql/install.sql when sql_installed_at IS NULL, records the
         // manifest version from plugin.json, and repairs existing volumes missing SQL init).
