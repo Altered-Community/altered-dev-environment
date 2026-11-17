@@ -457,6 +457,13 @@ if (Enabled("website"))
         // docker/stack/mirror-prod.php. Re-run it with --force inside the container.
         .WithEnvironment("AC_STACK_SEED", "1")
         .WithEnvironment("AC_STACK_MIRROR", "1")
+        // Re:Builder (Angular SPA plugin): activated by the repo's entrypoint via
+        // bin/plugins.php (idempotent, at every start). Once active, the account
+        // menu shows the « Beta Deckbuilder » toggle, which hands the decks/cards
+        // pages over to Re:Builder. Its bundle (plugins/rebuilder/dist) is not
+        // committed: build it in the checkout (cd plugins/rebuilder/app && npm ci
+        // && npm run build) — the source is bind-mounted, so no image rebuild.
+        .WithEnvironment("AC_ACTIVATE_PLUGINS", "rebuilder")
         .WithHttpEndpoint(port: 18181, targetPort: 80, name: "http")
         .WithUrlForEndpoint("http", url =>
         {
