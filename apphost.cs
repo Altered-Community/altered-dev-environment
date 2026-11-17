@@ -580,11 +580,9 @@ if (Enabled("website"))
 // The repo's root Dockerfile is PROD-only (a multi-stage Cloud Run build that bakes
 // the binary), so the repo ships a separate DEV image at docker/dev/Dockerfile that we
 // build and bind-mount the source into like decks/collection. Config is driven by
-// env + the app's own default.toml (config.rs honours a PORT override; per-env tomls
-// are optional, and default.toml already ships the right index path), so no custom
-// toml is needed. The
-// ~270 MB prebuilt index is downloaded once into a volume by the entrypoint (the
-// binary loads it from disk and won't fetch it itself). The server binds
+// env + the app's own default.toml (config.rs honours PORT and INDEX__* env
+// overrides; per-env tomls are optional). The prebuilt index is the prod archive,
+// fetched by the binary over HTTPS at every start (INDEX__SOURCE=http). The server binds
 // 0.0.0.0:$PORT, so it's reachable on the Aspire network by its resource name —
 // future consumers (website, decks-api) can point at http://altered-uniques-api:8080
 // with no change here. CORS is already CorsLayer::permissive in the app's http.rs, so
@@ -593,6 +591,9 @@ if (Enabled("website"))
 if (Enabled("uniques"))
 {
     var uniquesRepo = Repo("uniques-search-api");
+    var uniquesIndexUrl = builder.Configuration["Uniques:IndexUrl"] is { Length: > 0 } customIndexUrl
+        ? customIndexUrl
+        : "https://altered-search-artefacts-prod.s3.fr-par.scw.cloud/full_index.tar.zst";
 
     var uniquesApi = builder.AddDockerfile("altered-uniques-api", Path.Combine(uniquesRepo, "docker", "dev"))
         .WithBindMount(uniquesRepo, "/app")
@@ -602,22 +603,65 @@ if (Enabled("uniques"))
         // interval, only the toml can.
         .WithBindMount(Path.Combine(appHostDir, "uniques", "local.toml"),
             "/app/uniques-http-api/config/local.toml", isReadOnly: true)
-        // target/ (cargo build cache) and build/ (the downloaded index) in
-        // container-managed volumes — they shadow the host checkout's subpaths, so
-        // the first build is slow then cached, and the index persists across
-        // restarts. Same idea as decks/collection's vendor/ volume.
+        // target/ (cargo build cache) in a container-managed volume — it shadows the
+        // host checkout's target/, so the first build is slow then cached. Same idea as
+        // decks/collection's vendor/ volume.
         .WithVolume("altered-uniques-api-target", "/app/target")
-        .WithVolume("altered-uniques-index", "/app/build")
+        // Bypass the dev image's entrypoint (docker/dev/docker-entrypoint.sh): all it does
+        // is pre-download the old GCS index to disk, which we no longer use (see the
+        // INDEX__* env below). Overriding the entrypoint drops the image CMD too, so the
+        // `cargo run` is restated here.
+        .WithEntrypoint("cargo")
+        .WithArgs("run", "-p", "uniques-http-api", "--release")
         // Host port 8005: 8003 is taken by the ownership service (PR #3), 8004 by uniques-ui.
         .WithHttpEndpoint(port: 8005, targetPort: 8080, name: "http")
-        // PORT is honoured by config.rs (no custom toml needed). The index path is left
-        // to the app's default.toml (./build/full_index.tar.zst -> /app/build/...), which
-        // the entrypoint downloads into — setting INDEX_PATH too would just duplicate it
-        // and log a "prefer index.path in config" warning on every start.
+        // PORT is honoured by config.rs (no custom toml needed).
         .WithEnvironment("PORT", "8080")
         // Dashboard link: a friendly *.local.gd host (resolves to 127.0.0.1 -> the
         // Aspire proxy on :8005) hitting a tiny sample query.
         .WithUrl("http://uniques.altered.local.gd:8005/api/v2/cards?limit=1", "cards (sample)");
+
+    // Index source, in priority order (all from appsettings.Local.json, not committed):
+    //   1. Uniques:IndexPath — a LOCAL index: a `.tar.zst` archive or an index directory
+    //      (e.g. `build/full_index/ALL_SETS` straight out of cli-indexer). Absolute, or
+    //      relative to the uniques-search-api checkout. Bind-mounted read-only at /index
+    //      and loaded from disk (index.source = "disk"). For an archive we mount its
+    //      PARENT dir, so the loader's "nonunique/ next to the archive" fallback still works.
+    //   2. Uniques:IndexUrl — any public archive URL (index.source = "http").
+    //   3. Default: the SAME archive prod serves (uniques + nonunique/, ~77 MB), fetched
+    //      by the binary itself over plain HTTPS at every start — so the local search runs
+    //      on the current prod data, with no cached copy to go stale.
+    var usingLocalIndex = false;
+    var uniquesIndexPath = builder.Configuration["Uniques:IndexPath"];
+    if (!string.IsNullOrWhiteSpace(uniquesIndexPath))
+    {
+        var hostIndexPath = Path.GetFullPath(Path.Combine(uniquesRepo, uniquesIndexPath));
+        if (Directory.Exists(hostIndexPath))
+        {
+            uniquesApi.WithBindMount(hostIndexPath, "/index", isReadOnly: true)
+                .WithEnvironment("INDEX__SOURCE", "disk")
+                .WithEnvironment("INDEX__PATH", "/index");
+            Console.WriteLine($"[altered] uniques: using local index directory {hostIndexPath}");
+            usingLocalIndex = true;
+        }
+        else if (File.Exists(hostIndexPath))
+        {
+            uniquesApi.WithBindMount(Path.GetDirectoryName(hostIndexPath)!, "/index", isReadOnly: true)
+                .WithEnvironment("INDEX__SOURCE", "disk")
+                .WithEnvironment("INDEX__PATH", $"/index/{Path.GetFileName(hostIndexPath)}");
+            Console.WriteLine($"[altered] uniques: using local index archive {hostIndexPath}");
+            usingLocalIndex = true;
+        }
+        else
+        {
+            Console.WriteLine($"[altered] uniques: Uniques:IndexPath '{hostIndexPath}' not found; falling back to {uniquesIndexUrl}.");
+        }
+    }
+    if (!usingLocalIndex)
+    {
+        uniquesApi.WithEnvironment("INDEX__SOURCE", "http")
+            .WithEnvironment("INDEX__HTTP__URL", uniquesIndexUrl);
+    }
 
     // Optional private formats: if Uniques:FormatsDirectory (appsettings.Local.json, not
     // committed) points at a dir holding manifest.json + format files, bind-mount it
@@ -820,11 +864,14 @@ static CustomResourceSnapshot Hidden(string resourceType) =>
     new() { ResourceType = resourceType, Properties = [], IsHidden = true };
 
 // Resolve a repo path, cloning it from GitHub if the local checkout is missing.
+// Clones are FULL (all branches, full history) so the checkout is a normal working
+// repo you can switch branches in, pull, and open PRs from.
 string Repo(string name)
 {
     var path = Path.Combine(reposDir, name);
     if (Directory.Exists(path))
     {
+        UnshallowIfNeeded(name, path);
         return path;
     }
 
@@ -835,17 +882,58 @@ string Repo(string name)
 
     Console.WriteLine($"[altered] cloning {name} -> {path}");
     Directory.CreateDirectory(reposDir);
-    var psi = new ProcessStartInfo("git", $"clone --depth 1 {url} \"{path}\"")
+    var (exitCode, _) = Git(reposDir, "clone", url, path);
+    if (exitCode != 0)
     {
-        UseShellExecute = false,
-        WorkingDirectory = reposDir,
-    };
-    using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start git.");
-    proc.WaitForExit();
-    if (proc.ExitCode != 0)
-    {
-        throw new InvalidOperationException($"git clone failed for {name} (exit {proc.ExitCode}).");
+        throw new InvalidOperationException($"git clone failed for {name} (exit {exitCode}).");
     }
 
     return path;
+}
+
+// Earlier versions of this AppHost cloned with `--depth 1`, which also implies
+// `--single-branch`: one branch, no history. Convert such a checkout into a normal
+// clone once — widen the fetch refspec to every branch, then fetch the full history.
+// Only shallow repos are touched (anything you cloned yourself is left alone), and a
+// failure (offline, auth…) is just a warning: the checkout still works as-is.
+void UnshallowIfNeeded(string name, string path)
+{
+    var (code, output) = Git(path, "rev-parse", "--is-shallow-repository");
+    if (code != 0 || output.Trim() != "true")
+    {
+        return;
+    }
+
+    Console.WriteLine($"[altered] {name}: shallow single-branch clone detected, fetching all branches + full history (one-time)...");
+    var steps = new[]
+    {
+        new[] { "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*" },
+        new[] { "fetch", "--unshallow", "origin" },
+    };
+    foreach (var step in steps)
+    {
+        var (stepCode, _) = Git(path, step);
+        if (stepCode != 0)
+        {
+            Console.WriteLine($"[altered] {name}: `git {string.Join(' ', step)}` failed (exit {stepCode}); keeping the shallow clone. Retry by hand from {path}.");
+            return;
+        }
+    }
+}
+
+// Run git with an argument list (no shell quoting issues), returning exit code + stdout.
+// stderr is left attached to the console so clone/fetch progress stays visible.
+static (int ExitCode, string StdOut) Git(string workingDirectory, params string[] args)
+{
+    var psi = new ProcessStartInfo("git")
+    {
+        UseShellExecute = false,
+        WorkingDirectory = workingDirectory,
+        RedirectStandardOutput = true,
+    };
+    foreach (var arg in args) psi.ArgumentList.Add(arg);
+    using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start git.");
+    var stdout = proc.StandardOutput.ReadToEnd();
+    proc.WaitForExit();
+    return (proc.ExitCode, stdout);
 }

@@ -5,6 +5,12 @@ Local orchestrator for the Altered community projects, wired together, built on
 launches them, and gives you a single dashboard with logs and per-service
 start/stop.
 
+The clones are **normal, full clones** (every branch, full history), so you can switch
+branches, pull and open PRs straight from them. Checkouts made by older versions of this
+repo (shallow `--depth 1`, so a single branch) are converted automatically on the next
+start: the AppHost widens their fetch refspec to all branches and runs
+`git fetch --unshallow` once. Repos you cloned yourself are left untouched.
+
 ## Run
 
 ```pwsh
@@ -155,20 +161,27 @@ in DbGate. Two things to know:
 
 - **Build** — the repo's root Dockerfile is prod-only (a multi-stage Cloud Run build
   that bakes the binary), so the repo ships a separate dev image at
-  `docker/dev/Dockerfile`: a thin `rust:1.86` image whose entrypoint downloads the
-  index, then runs `cargo run -p uniques-http-api --release`. The AppHost points the
-  `uniques` resource at that Dockerfile, bind-mounts the repo source at `/app`, and
-  keeps the cargo build cache in the `altered-uniques-api-target` volume (first build
-  is slow, like decks; later starts are fast).
-- **Index** — the server loads a ~270 MB prebuilt card index from disk (it doesn't
-  fetch it itself). The entrypoint downloads `full_index.tar.zst` from
-  `storage.googleapis.com/taum-reunion-public` into the `altered-uniques-index` volume
-  on first start only; the loader reads the archive directly (no extraction). Wipe
-  that volume to re-download.
+  `docker/dev/Dockerfile`: a thin `rust:1.86` image. The AppHost points the `uniques`
+  resource at that Dockerfile, bind-mounts the repo source at `/app`, runs
+  `cargo run -p uniques-http-api --release` directly (it bypasses the image's entrypoint,
+  which only pre-downloads the old GCS index), and keeps the cargo build cache in the
+  `altered-uniques-api-target` volume (first build is slow, like decks; later starts
+  are fast).
+- **Index** — the **same archive prod serves**:
+  `https://altered-search-artefacts-prod.s3.fr-par.scw.cloud/full_index.tar.zst`
+  (~77 MB, uniques + non-uniques). The server fetches it itself over HTTPS at every
+  start (`INDEX__SOURCE=http`, no credentials, nothing cached on disk), so the local
+  search always runs on the current prod data. Overrides, in `appsettings.Local.json`:
+  - `Uniques:IndexPath` — a **local** index: a `.tar.zst` archive or an index directory
+    (e.g. `build/full_index/ALL_SETS` from `cli-indexer`), absolute or relative to the
+    uniques-search-api checkout. Bind-mounted read-only and loaded from disk; wins over
+    the URL. If the path doesn't exist, the AppHost warns and falls back to the URL.
+  - `Uniques:IndexUrl` — another public archive URL instead of the prod one.
 
-Config is driven by env + the app's own `default.toml` (`PORT` override; the index path
-comes from `default.toml`) — its per-environment
-toml files are optional, so no config file is bind-mounted.
+  No hot-reload of the index: restart the resource to pick up a new archive.
+
+Config is driven by env + the app's own `default.toml` (`PORT` and `INDEX__*` overrides)
+— its per-environment toml files are optional, so no config file is bind-mounted.
 
 **Formats.** A "format" (e.g. `frontier`, `living-legend`) is a curated card subset — a
 JSON allowlist (`included_refs`) or denylist (`excluded_sets` / `excluded_refs`) of card
@@ -190,13 +203,15 @@ It replaces the repo's formats entirely, so include every format you want (e.g.
 **Hot-reload note:** the poller compares the manifest's per-id `version`, so to pick up an
 edit you must bump `version` in BOTH the format file and its `manifest.json` row.
 
-To re-download the index / rebuild this service from scratch — **without touching any
-project DB** — wipe its own two volumes (the downloaded index + the cargo build cache)
-and restart:
+To rebuild this service from scratch — **without touching any project DB** — wipe its
+cargo build cache volume and restart (the index is re-fetched at every start anyway):
 
 ```sh
-docker volume rm altered-uniques-index altered-uniques-api-target
+docker volume rm altered-uniques-api-target
 ```
+
+The `altered-uniques-index` volume used by older versions (the GCS index downloaded to
+disk) is no longer mounted; you can delete it: `docker volume rm altered-uniques-index`.
 
 ### uniques-ui (demo-ui)
 
