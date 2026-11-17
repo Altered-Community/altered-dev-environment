@@ -98,11 +98,11 @@ website checkout's own copy. That one file is where the wiring lives:
   Keycloak login she reaches the admin panel at `/admin`. A real login never resets
   it, and it survives a DB wipe. Add more admins via the seed SQL in `apphost.cs`.
   (The bundled local `admin`/`admin` account still exists for `KC_URL`-less setups.)
-- **plugins** — the same seed auto-activates the **Altered Cards** (`core-altered-cards`)
-  and **Réunion Events** (`reunion-events`) plugins, reproducing the admin "Activate"
-  action: an `is_active=1` row in `dev_plugins`, plus running `reunion-events`'
-  `install.sql` (its `{table}` → `dev_plugin_re_*`) once. Idempotent, so it survives a
-  DB wipe — no more activating them by hand in `/admin`.
+- **plugins** — the website container gets `AC_ACTIVATE_PLUGINS="core-altered-cards reunion-events"`,
+  so `docker/entrypoint.sh` runs `php bin/plugins.php activate` on startup. That mirrors the
+  admin "Activate" action (`is_active=1`, manifest version from `plugin.json`, and running any
+  `sql/install.sql` when `sql_installed_at` is `NULL`). Idempotent, so it survives a DB wipe and
+  repairs older volumes whose plugin SQL had not been marked installed.
 - **content** — the container gets `AC_STACK_SEED=1` and `AC_STACK_MIRROR=1`, so the repo's
   own entrypoint loads the production **main menu** (`docker/stack/seed.php`) and copies the
   public content of altered.re — news articles, content pages, side menu, footer, and their
